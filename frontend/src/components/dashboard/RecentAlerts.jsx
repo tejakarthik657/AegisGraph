@@ -1,0 +1,1 @@
+export default function RecentAlerts({ alerts = [] }) { return <section className="chart-card"><h2>Recent alerts</h2>{alerts.map((alert) => <div key={alert.alert_id || alert.id}>{alert.title || alert.alert_id || alert.id}</div>)}</section>; }

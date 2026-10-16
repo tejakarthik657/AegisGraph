@@ -1,0 +1,5 @@
+typology,total,rf_detected,rf_recall,tgn_detected,tgn_recall,rf_missed,tgn_missed
+circular,12,12,1.0,11,0.9166666666666666,0,1
+fan_out,10,10,1.0,10,1.0,0,0
+rapid_movement,10,10,1.0,10,1.0,0,0
+structuring,11,9,0.8181818181818182,9,0.8181818181818182,2,2

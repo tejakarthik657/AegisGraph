@@ -1,0 +1,1 @@
+export default function AlertFilters({ value = "", onChange }) { return <input type="search" value={value} onChange={(event) => onChange?.(event.target.value)} placeholder="Filter alerts" aria-label="Filter alerts" />; }

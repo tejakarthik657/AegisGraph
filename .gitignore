@@ -1,0 +1,52 @@
+# ============================================================
+# AegisGraph — .gitignore
+# ============================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+*.joblib
+*.pt
+*.pth
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Vite build
+dist/
+*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data (generated during pipeline runs)
+backend/app/data/raw/*.csv
+backend/app/data/processed/*.csv
+backend/app/data/results/*.csv
+backend/app/data/results/*.graphml
+backend/app/data/results/*.joblib
+backend/app/data/results/*.png
+backend/app/data/results/*.json
+
+# Logs
+*.log

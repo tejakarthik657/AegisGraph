@@ -1,0 +1,1 @@
+export default function CaseTable({ cases = [], onSelect }) { return <table><thead><tr><th>Case</th><th>Priority</th><th>Status</th></tr></thead><tbody>{cases.map((item) => <tr key={item.case_id || item.id} onClick={() => onSelect?.(item)}><td>{item.title || item.case_id || item.id}</td><td>{item.priority || "—"}</td><td>{item.status || "open"}</td></tr>)}</tbody></table>; }

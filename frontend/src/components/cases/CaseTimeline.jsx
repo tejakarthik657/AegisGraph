@@ -1,0 +1,1 @@
+export default function CaseTimeline({ events = [] }) { return <ol>{events.map((event, index) => <li key={event.id || index}>{event.timestamp || ""} {event.description || event.action || JSON.stringify(event)}</li>)}</ol>; }

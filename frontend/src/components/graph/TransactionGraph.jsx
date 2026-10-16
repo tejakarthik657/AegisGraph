@@ -1,0 +1,1 @@
+export default function TransactionGraph({ graph = { nodes: [], links: [] } }) { return <section className="graph-card"><h2>Transaction graph</h2><p>{graph.nodes?.length || 0} nodes · {graph.links?.length || 0} connections</p></section>; }

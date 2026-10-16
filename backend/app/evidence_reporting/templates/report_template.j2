@@ -1,0 +1,52 @@
+================================================================================
+                         AEGISGRAPH INVESTIGATION REPORT
+================================================================================
+
+Report ID:        {{ report_id }}
+Case ID:          {{ case_summary.case_id }}
+Generated:        {{ generated_at }}
+
+--------------------------------------------------------------------------------
+                              CASE SUMMARY
+--------------------------------------------------------------------------------
+
+Status:           {{ case_summary.status }}
+Priority:         {{ case_summary.priority }}
+Alert ID:         {{ case_summary.alert_id }}
+Transaction ID:   {{ case_summary.transaction_id }}
+Amount:           {{ case_summary.amount }}
+Risk Score:       {{ case_summary.risk_score }}
+Risk Category:    {{ case_summary.risk_category }}
+
+--------------------------------------------------------------------------------
+                              NARRATIVE
+--------------------------------------------------------------------------------
+
+{{ narrative }}
+
+--------------------------------------------------------------------------------
+                           EVIDENCE CHAIN
+--------------------------------------------------------------------------------
+
+{% if evidence.evidence %}
+{% for item in evidence.evidence %}
+  [{{ item.severity }}] {{ item.evidence_type }}
+    Source:      {{ item.source }}
+    Timestamp:  {{ item.timestamp }}
+    Details:    {{ item.description }}
+{% endfor %}
+{% else %}
+  No evidence items recorded.
+{% endif %}
+
+--------------------------------------------------------------------------------
+                          RECOMMENDATIONS
+--------------------------------------------------------------------------------
+
+{% for rec in recommendations %}
+  {{ loop.index }}. {{ rec }}
+{% endfor %}
+
+================================================================================
+                          END OF REPORT
+================================================================================

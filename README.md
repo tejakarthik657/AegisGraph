@@ -29,14 +29,13 @@ AegisGraph provides a complete pipeline for financial-crime investigation:
 | Layer | Technology |
 |-------|-----------|
 | Backend API | FastAPI + Python 3.13 |
-| Frontend | Next.js 16 + React 19 + Tailwind CSS 4 |
-| Graph Analysis | NetworkX + Cytoscape.js |
+| Frontend | Vite 8 + React 19 + Vanilla CSS |
+| Graph Analysis | NetworkX + react-force-graph |
 | ML / Risk Engine | scikit-learn (RandomForest baseline) |
-| Agentic AI | Anthropic Claude (optional) |
-| Database | SQLite (MVP) → PostgreSQL (production) |
+| Deep Learning | PyTorch + TGN + Heterogeneous GNN |
+| Data Storage | CSV / GraphML (MVP) → PostgreSQL (production) |
 | Vector Search | TF-IDF (MVP) → Qdrant (production) |
-| Graph DB | NetworkX (MVP) → Neo4j (production) |
-| Containerization | Docker Compose |
+| Testing | pytest + unittest |
 
 ---
 

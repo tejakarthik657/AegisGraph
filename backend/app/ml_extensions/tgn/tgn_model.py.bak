@@ -1,0 +1,535 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from torch_geometric.nn import GATConv
+
+from app.ml_extensions.tgn.message import MessageEncoder
+from app.ml_extensions.tgn.memory import TemporalMemory
+from app.ml_extensions.tgn.time_encoding import TimeEncoder
+
+
+class TGNFraudModel(nn.Module):
+    """
+    Initial graph-based fraud model.
+
+    This is retained for the original account-level prototype.
+
+    It combines:
+
+    1. Account/node features
+    2. Timestamp information
+    3. Graph attention
+
+    Output:
+        Account-level fraud logit.
+    """
+
+    def __init__(
+        self,
+        input_dim,
+        hidden_dim=64,
+        output_dim=1,
+        heads=2,
+        dropout=0.2,
+    ):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+
+        # -----------------------------------------------------
+        # Input projection
+        # -----------------------------------------------------
+
+        self.input_projection = nn.Linear(
+            input_dim,
+            hidden_dim,
+        )
+
+        # -----------------------------------------------------
+        # Timestamp encoding
+        # -----------------------------------------------------
+
+        self.time_encoder = nn.Sequential(
+            nn.Linear(
+                1,
+                hidden_dim,
+            ),
+            nn.ReLU(),
+            nn.Linear(
+                hidden_dim,
+                hidden_dim,
+            ),
+        )
+
+        # -----------------------------------------------------
+        # Graph attention
+        # -----------------------------------------------------
+
+        self.gat1 = GATConv(
+            hidden_dim,
+            hidden_dim,
+            heads=heads,
+            concat=False,
+            dropout=dropout,
+        )
+
+        self.gat2 = GATConv(
+            hidden_dim,
+            hidden_dim,
+            heads=heads,
+            concat=False,
+            dropout=dropout,
+        )
+
+        # -----------------------------------------------------
+        # Classifier
+        # -----------------------------------------------------
+
+        self.classifier = nn.Sequential(
+            nn.Linear(
+                hidden_dim,
+                hidden_dim // 2,
+            ),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(
+                hidden_dim // 2,
+                output_dim,
+            ),
+        )
+
+    def forward(
+        self,
+        x,
+        edge_index,
+        timestamps,
+    ):
+        """
+        Forward pass for the initial account-level graph model.
+        """
+
+        x = self.input_projection(x)
+
+        time_embedding = self.time_encoder(
+            timestamps
+        )
+
+        x = x + time_embedding
+        x = F.relu(x)
+
+        x = self.gat1(
+            x,
+            edge_index,
+        )
+
+        x = F.relu(x)
+
+        x = self.gat2(
+            x,
+            edge_index,
+        )
+
+        x = F.relu(x)
+
+        logits = self.classifier(x)
+
+        return logits.squeeze(-1)
+
+
+class TemporalMemoryTGN(nn.Module):
+    """
+    Event-driven temporal graph model for transaction-level
+    fraud prediction.
+
+    Architecture:
+
+        transaction event
+              |
+              v
+        transaction encoder
+              |
+              +------------------+
+              |                  |
+              v                  v
+        temporal encoding    account memories
+              |                  |
+              +--------+---------+
+                       |
+                       v
+                message encoder
+                       |
+                       v
+               transaction representation
+                       |
+                       v
+                  fraud classifier
+
+    After the current event has been scored, the event message
+    updates the sender and receiver account memories.
+
+    Important temporal rule:
+
+        predict(event_t)
+        update_memory(event_t)
+
+    This prevents the current transaction from leaking directly
+    into its own prediction.
+    """
+
+    def __init__(
+        self,
+        input_dim,
+        num_nodes,
+        hidden_dim=64,
+        message_dim=64,
+        heads=2,
+        dropout=0.2,
+    ):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.message_dim = message_dim
+        self.num_nodes = num_nodes
+
+        # -----------------------------------------------------
+        # Transaction projection
+        # -----------------------------------------------------
+
+        self.input_projection = nn.Linear(
+            input_dim,
+            hidden_dim,
+        )
+
+        # -----------------------------------------------------
+        # Temporal encoding
+        # -----------------------------------------------------
+
+        self.time_encoder = TimeEncoder(
+            output_dim=hidden_dim,
+        )
+
+        # -----------------------------------------------------
+        # Persistent account memory
+        # -----------------------------------------------------
+
+        self.memory = TemporalMemory(
+            num_nodes=num_nodes,
+            memory_dim=hidden_dim,
+            message_dim=message_dim,
+        )
+
+        # -----------------------------------------------------
+        # Event message encoder
+        # -----------------------------------------------------
+
+        self.message_encoder = MessageEncoder(
+            memory_dim=hidden_dim,
+            transaction_dim=input_dim,
+            time_dim=hidden_dim,
+            message_dim=message_dim,
+        )
+
+        # -----------------------------------------------------
+        # Transaction-level graph attention
+        #
+        # These layers operate on the sender/receiver
+        # representation for the current transaction.
+        # -----------------------------------------------------
+
+        self.gat1 = GATConv(
+            hidden_dim,
+            hidden_dim,
+            heads=heads,
+            concat=False,
+            dropout=dropout,
+        )
+
+        self.gat2 = GATConv(
+            hidden_dim,
+            hidden_dim,
+            heads=heads,
+            concat=False,
+            dropout=dropout,
+        )
+
+        # -----------------------------------------------------
+        # Transaction representation
+        #
+        # sender memory
+        # receiver memory
+        # message
+        # -----------------------------------------------------
+
+        self.transaction_projection = nn.Linear(
+            hidden_dim
+            + hidden_dim
+            + message_dim,
+            hidden_dim,
+        )
+
+        # -----------------------------------------------------
+        # Classifier
+        # -----------------------------------------------------
+
+        self.classifier = nn.Sequential(
+            nn.Linear(
+                hidden_dim,
+                hidden_dim // 2,
+            ),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(
+                hidden_dim // 2,
+                1,
+            ),
+        )
+
+    # =========================================================
+    # MEMORY ACCESS
+    # =========================================================
+
+    def get_account_memory(
+        self,
+        node_ids,
+    ):
+        """
+        Return current memory for account IDs.
+        """
+
+        return self.memory.get_memory(
+            node_ids
+        )
+
+    def get_last_update(
+        self,
+        node_ids,
+    ):
+        """
+        Return the latest event time for account IDs.
+        """
+
+        return self.memory.get_last_update(
+            node_ids
+        )
+
+    # =========================================================
+    # EVENT ENCODING
+    # =========================================================
+
+    def encode_event(
+        self,
+        sender_ids,
+        receiver_ids,
+        transaction_features,
+        delta_t,
+    ):
+        """
+        Encode one transaction event using the account memories
+        available BEFORE the event is observed.
+        """
+
+        sender_memory = self.memory.get_memory(
+            sender_ids
+        )
+
+        receiver_memory = self.memory.get_memory(
+            receiver_ids
+        )
+
+        # -----------------------------------------------------
+        # Temporal representation
+        # -----------------------------------------------------
+
+        time_embedding = self.time_encoder(
+            delta_t
+        )
+
+        # -----------------------------------------------------
+        # Event message
+        # -----------------------------------------------------
+
+        message = self.message_encoder(
+            sender_memory=sender_memory,
+            receiver_memory=receiver_memory,
+            transaction_features=transaction_features,
+            time_embedding=time_embedding,
+        )
+
+        # -----------------------------------------------------
+        # Transaction representation
+        # -----------------------------------------------------
+
+        projected_transaction = self.input_projection(
+            transaction_features
+        )
+
+        return (
+            sender_memory,
+            receiver_memory,
+            projected_transaction,
+            message,
+        )
+
+    # =========================================================
+    # EVENT PREDICTION
+    # =========================================================
+
+    def predict_event(
+        self,
+        sender_ids,
+        receiver_ids,
+        transaction_features,
+        delta_t,
+    ):
+        """
+        Predict fraud probability/logit for the current event.
+
+        Memory is read before this event is committed.
+        """
+
+        (
+            sender_memory,
+            receiver_memory,
+            transaction_representation,
+            message,
+        ) = self.encode_event(
+            sender_ids=sender_ids,
+            receiver_ids=receiver_ids,
+            transaction_features=transaction_features,
+            delta_t=delta_t,
+        )
+
+        # -----------------------------------------------------
+        # Combine account history and event message
+        # -----------------------------------------------------
+
+        transaction_representation = torch.cat(
+            [
+                sender_memory,
+                receiver_memory,
+                message,
+            ],
+            dim=-1,
+        )
+
+        transaction_representation = (
+            self.transaction_projection(
+                transaction_representation
+            )
+        )
+
+        transaction_representation = F.relu(
+            transaction_representation
+        )
+
+        # -----------------------------------------------------
+        # Fraud classifier
+        # -----------------------------------------------------
+
+        logits = self.classifier(
+            transaction_representation
+        )
+
+        return logits.squeeze(-1)
+
+    # =========================================================
+    # MEMORY UPDATE
+    # =========================================================
+
+    @torch.no_grad()
+    def update_event_memory(
+        self,
+        sender_ids,
+        receiver_ids,
+        transaction_features,
+        delta_t,
+        timestamps,
+    ):
+        """
+        Update account memories AFTER the current transaction
+        has been predicted.
+
+        This method fixes the previous mismatch with TemporalMemory.
+
+        Previous implementation expected:
+
+            memory.update_memory(...)
+
+        The current TemporalMemory implementation instead uses:
+
+            compute_updated_memory(...)
+            commit_memory(...)
+
+        Sender and receiver are handled together when possible.
+        """
+
+        (
+            _,
+            _,
+            _,
+            message,
+        ) = self.encode_event(
+            sender_ids=sender_ids,
+            receiver_ids=receiver_ids,
+            transaction_features=transaction_features,
+            delta_t=delta_t,
+        )
+
+        # -----------------------------------------------------
+        # Sender update
+        # -----------------------------------------------------
+
+        sender_new_memory = (
+            self.memory.compute_updated_memory(
+                node_ids=sender_ids,
+                messages=message,
+            )
+        )
+
+        self.memory.commit_memory(
+            node_ids=sender_ids,
+            new_memory=sender_new_memory,
+            timestamps=timestamps,
+        )
+
+        # -----------------------------------------------------
+        # Receiver update
+        # -----------------------------------------------------
+
+        # If sender and receiver are the same account, the sender
+        # update above already represents the event. Applying a
+        # second GRU update would process the same event twice.
+        #
+        # Therefore only update receiver separately when the
+        # receiver is different.
+        if not torch.equal(
+            sender_ids,
+            receiver_ids,
+        ):
+            receiver_new_memory = (
+                self.memory.compute_updated_memory(
+                    node_ids=receiver_ids,
+                    messages=message,
+                )
+            )
+
+            self.memory.commit_memory(
+                node_ids=receiver_ids,
+                new_memory=receiver_new_memory,
+                timestamps=timestamps,
+            )
+
+    # =========================================================
+    # RESET
+    # =========================================================
+
+    @torch.no_grad()
+    def reset_memory(self):
+        """
+        Reset all account temporal states.
+        """
+
+        self.memory.reset_memory()

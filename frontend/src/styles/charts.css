@@ -1,0 +1,2 @@
+.chart-card pre, .graph-card pre { max-height: 280px; overflow: auto; color: var(--color-muted); }
+@media (max-width: 800px) { .summary-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } .main-content { padding: 16px; } }

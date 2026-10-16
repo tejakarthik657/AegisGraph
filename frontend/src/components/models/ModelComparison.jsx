@@ -1,0 +1,1 @@
+export default function ModelComparison({ models = [] }) { return <table><thead><tr><th>Model</th><th>F1</th><th>ROC AUC</th></tr></thead><tbody>{models.map((model) => <tr key={model.name}><td>{model.name}</td><td>{model.f1 ?? "—"}</td><td>{model.roc_auc ?? "—"}</td></tr>)}</tbody></table>; }

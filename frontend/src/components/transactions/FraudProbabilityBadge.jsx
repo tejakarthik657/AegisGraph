@@ -1,0 +1,1 @@
+export default function FraudProbabilityBadge({ value = 0 }) { const score = Number(value); return <span className={`risk-badge ${score >= 0.5 ? "high" : "low"}`}>{(score * 100).toFixed(1)}%</span>; }

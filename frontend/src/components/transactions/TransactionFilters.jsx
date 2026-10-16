@@ -1,0 +1,1 @@
+export default function TransactionFilters({ filters = {}, onChange }) { return <div className="filters">{Object.entries(filters).map(([name, value]) => <label key={name}>{name}<input value={value || ""} onChange={(event) => onChange?.(name, event.target.value)} /></label>)}</div>; }

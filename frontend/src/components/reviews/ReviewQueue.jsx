@@ -1,0 +1,1 @@
+export default function ReviewQueue({ reviews = [], onSelect }) { return <ul>{reviews.map((review) => <li key={review.id || review.review_id}><button type="button" onClick={() => onSelect?.(review)}>{review.title || review.case_id || review.id}</button></li>)}</ul>; }
