@@ -1,2 +1,2 @@
 model,precision,recall,f1,roc_auc,pr_auc,threshold,train_transactions,test_transactions,test_frauds
-THGNN_temporal_heterogeneous_prototype,0.8,0.46511627906976744,0.5882352941176471,0.9332836463998324,0.582091238731447,0.5,8158,2040,43
+THGNN_temporal_heterogeneous_prototype,0.05415162454873646,0.3488372093023256,0.09375,0.6790651092918447,0.07735219736069089,0.5,8158,2040,43
