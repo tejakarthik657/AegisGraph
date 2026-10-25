@@ -1,0 +1,4 @@
+# Install these in addition to requirements.txt to train/run GNN models.
+# For CUDA installations, install the matching PyTorch build from pytorch.org first.
+torch>=2.1.0
+torch-geometric>=2.4.0

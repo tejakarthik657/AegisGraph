@@ -14,6 +14,10 @@ from app.baseline_model.baseline_model import BaselineFraudModel
 from app.baseline_model.features.feature_engineering import (
     build_features,
 )
+from app.baseline_model.features.feature_engineering import (
+    NON_MODEL_COLUMNS,
+    chronological_split_index,
+)
 from app.utils.config import (
     CLEAN_TRANSACTIONS_FILE,
     RESULTS_DATA_DIR,
@@ -32,10 +36,34 @@ def load_model() -> BaselineFraudModel:
             f"Trained model not found: {MODEL_FILE}"
         )
 
-    return joblib.load(MODEL_FILE)
+    artifact = joblib.load(MODEL_FILE)
+    if isinstance(artifact, dict):
+        model = artifact.get("model")
+        feature_columns = artifact.get("feature_columns")
+        if model is None or not isinstance(feature_columns, list):
+            raise ValueError(
+                f"Invalid Random Forest model artifact: {MODEL_FILE}"
+            )
+        model.feature_columns = feature_columns
+        return model
+
+    if not isinstance(artifact, BaselineFraudModel):
+        raise ValueError(
+            f"Invalid Random Forest model artifact: {MODEL_FILE}"
+        )
+    artifact.feature_columns = list(
+        artifact.model.feature_names_in_
+    )
+    if NON_MODEL_COLUMNS.intersection(artifact.feature_columns):
+        raise ValueError(
+            "Saved Random Forest model includes excluded feature columns."
+        )
+    return artifact
 
 
-def prepare_test_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+def prepare_test_data(
+    feature_columns: list[str] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Load transactions_clean.csv and split into the
     same 80/20 chronological test set used during training.
@@ -52,12 +80,21 @@ def prepare_test_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     df = pd.read_csv(CLEAN_TRANSACTIONS_FILE)
 
     df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.sort_values("timestamp")
+    df = (
+        df.sort_values("timestamp", kind="mergesort")
+        .reset_index(drop=True)
+    )
 
-    split_index = int(len(df) * 0.80)
+    split_index = chronological_split_index(df)
     test_df = df.iloc[split_index:].copy()
 
-    test_features = build_features(test_df)
+    all_features = build_features(
+        df,
+        feature_columns=feature_columns,
+    )
+    test_features = all_features.iloc[
+        split_index:
+    ].copy()
 
     return test_features, test_df
 
@@ -78,7 +115,12 @@ def predict(
     if model is None:
         model = load_model()
 
-    test_features, test_df = prepare_test_data()
+    feature_columns = getattr(
+        model,
+        "feature_columns",
+        list(model.model.feature_names_in_),
+    )
+    test_features, test_df = prepare_test_data(feature_columns)
 
     predictions = model.predict(test_features)
     probabilities = model.fraud_probability(test_features)

@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import joblib
 import pandas as pd
 
 from sklearn.metrics import (
@@ -32,6 +33,10 @@ from app.utils.config import (
 from app.baseline_model.baseline_model import (
     BaselineFraudModel,
 )
+from app.baseline_model.features.feature_engineering import (
+    NON_MODEL_COLUMNS,
+    chronological_split_index,
+)
 
 
 # ---------------------------------------------------------
@@ -57,6 +62,11 @@ FEATURE_IMPORTANCE_FILE = (
     / "baseline_feature_importance.csv"
 )
 
+MODEL_FILE = (
+    RESULTS_DATA_DIR
+    / "baseline_rf_model.joblib"
+)
+
 
 # ---------------------------------------------------------
 # Configuration
@@ -78,6 +88,14 @@ def load_dataset():
 
     df = pd.read_csv(
         FEATURES_FILE
+    )
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        errors="raise",
+    )
+    df = (
+        df.sort_values("timestamp", kind="mergesort")
+        .reset_index(drop=True)
     )
 
     print(
@@ -104,10 +122,15 @@ def prepare_data(
         "\n========== DATA PREPARATION =========="
     )
 
-    # -----------------------------------------------------
-    # Make a copy
-    # -----------------------------------------------------
     df = df.copy()
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        errors="raise",
+    )
+    df = (
+        df.sort_values("timestamp", kind="mergesort")
+        .reset_index(drop=True)
+    )
 
     # -----------------------------------------------------
     # Target
@@ -117,17 +140,28 @@ def prepare_data(
     # -----------------------------------------------------
     # Remove labels and non-model columns
     # -----------------------------------------------------
-    forbidden_columns = [
-        "transaction_id",
-        "timestamp",
-        "is_fraud",
-        "typology",
-    ]
+    split_index = chronological_split_index(
+        df,
+        TRAIN_RATIO,
+    )
 
     feature_columns = [
         column
         for column in df.columns
-        if column not in forbidden_columns
+        if column not in NON_MODEL_COLUMNS
+    ]
+
+    categorical_prefixes = (
+        "channel_",
+        "transaction_type_",
+        "currency_",
+    )
+    training_rows = df.iloc[:split_index]
+    feature_columns = [
+        column
+        for column in feature_columns
+        if not column.startswith(categorical_prefixes)
+        or training_rows[column].ne(0).any()
     ]
 
     # -----------------------------------------------------
@@ -149,10 +183,6 @@ def prepare_data(
     # -----------------------------------------------------
     # Chronological split
     # -----------------------------------------------------
-    split_index = int(
-        len(df) * TRAIN_RATIO
-    )
-
     X_train = X.iloc[
         :split_index
     ].copy()
@@ -526,6 +556,17 @@ def run_training():
         y_train,
     )
 
+    joblib.dump(
+        {
+            "model": model,
+            "feature_columns": feature_columns,
+        },
+        MODEL_FILE,
+    )
+    print(
+        f"Trained RF model and feature schema saved to:\n{MODEL_FILE}"
+    )
+
     # -----------------------------------------------------
     # Evaluate
     # -----------------------------------------------------
@@ -542,8 +583,9 @@ def run_training():
     # -----------------------------------------------------
     # Calculate test starting index
     # -----------------------------------------------------
-    test_start_index = int(
-        len(df) * TRAIN_RATIO
+    test_start_index = chronological_split_index(
+        df,
+        TRAIN_RATIO,
     )
 
     # -----------------------------------------------------

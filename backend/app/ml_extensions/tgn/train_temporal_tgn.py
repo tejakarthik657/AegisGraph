@@ -41,6 +41,7 @@ from app.ml_extensions.tgn.tgn_model import (
 )
 
 from app.ml_extensions.tgn.temporal_features import (
+    chronological_split_index,
     create_temporal_features,
 )
 
@@ -124,7 +125,7 @@ def load_transactions():
 
     df = (
         df
-        .sort_values("timestamp")
+        .sort_values("timestamp", kind="mergesort")
         .reset_index(drop=True)
     )
 
@@ -275,7 +276,7 @@ def build_event_tensors(
 
     timestamps = torch.tensor(
         timestamps,
-        dtype=torch.float32,
+        dtype=torch.float64,
     )
 
     return (
@@ -314,6 +315,25 @@ def calculate_pos_weight(
 # ---------------------------------------------------------
 
 
+def _timestamp_batch_ranges(
+    timestamps,
+    start_index,
+    end_index,
+):
+    """Yield contiguous index ranges that share a timestamp."""
+
+    batch_start = start_index
+    while batch_start < end_index:
+        batch_end = batch_start + 1
+        while (
+            batch_end < end_index
+            and timestamps[batch_end] == timestamps[batch_start]
+        ):
+            batch_end += 1
+        yield batch_start, batch_end
+        batch_start = batch_end
+
+
 def train_one_epoch(
     model,
     optimizer,
@@ -346,17 +366,17 @@ def train_one_epoch(
 
     optimizer.zero_grad(set_to_none=True)
 
-    for index in range(start_index, end_index):
-        sender = sender_ids[index:index + 1]
-        receiver = receiver_ids[index:index + 1]
-        transaction = features[index:index + 1]
-        time_delta = delta_t[index:index + 1]
-        timestamp = timestamps[index:index + 1]
-        target = labels[index:index + 1]
-
-        # -----------------------------------------------------
-        # 1. Predict BEFORE updating account memory.
-        # -----------------------------------------------------
+    for batch_start, batch_end in _timestamp_batch_ranges(
+        timestamps,
+        start_index,
+        end_index,
+    ):
+        sender = sender_ids[batch_start:batch_end]
+        receiver = receiver_ids[batch_start:batch_end]
+        transaction = features[batch_start:batch_end]
+        time_delta = delta_t[batch_start:batch_end]
+        timestamp = timestamps[batch_start:batch_end]
+        target = labels[batch_start:batch_end]
 
         logits = model.predict_event(
             sender_ids=sender,
@@ -364,21 +384,15 @@ def train_one_epoch(
             transaction_features=transaction,
             delta_t=time_delta,
         )
-
         loss = criterion(logits, target)
+        batch_size = batch_end - batch_start
+        weighted_loss = loss * batch_size
+        window_losses.append(weighted_loss)
+        window_count += batch_size
+        total_loss += loss.detach().item() * batch_size
+        count += batch_size
 
-        # Retain this event's loss until the window backward pass.
-        window_losses.append(loss)
-        window_count += 1
-
-        total_loss += loss.detach().item()
-        count += 1
-
-        # -----------------------------------------------------
-        # 2. Observe the event and update memory WITH gradients.
-        # -----------------------------------------------------
-
-        model.update_event_memory(
+        model.update_event_memory_batch(
             sender_ids=sender,
             receiver_ids=receiver,
             transaction_features=transaction,
@@ -387,17 +401,13 @@ def train_one_epoch(
             track_grad=True,
         )
 
-        # -----------------------------------------------------
-        # 3. Backpropagate at the window boundary.
-        # -----------------------------------------------------
-
         is_window_end = (
             window_count >= TBPTT_WINDOW_SIZE
-            or index == end_index - 1
+            or batch_end == end_index
         )
 
         if is_window_end:
-            window_loss = torch.stack(window_losses).mean()
+            window_loss = torch.stack(window_losses).sum() / window_count
 
             window_loss.backward()
 
@@ -447,38 +457,17 @@ def evaluate(
 
     with torch.no_grad():
 
-        for index in range(
+        for batch_start, batch_end in _timestamp_batch_ranges(
+            timestamps,
             start_index,
             end_index,
         ):
-
-            sender = sender_ids[
-                index:index + 1
-            ]
-
-            receiver = receiver_ids[
-                index:index + 1
-            ]
-
-            transaction = features[
-                index:index + 1
-            ]
-
-            time_delta = delta_t[
-                index:index + 1
-            ]
-
-            timestamp = timestamps[
-                index:index + 1
-            ]
-
-            target = labels[
-                index:index + 1
-            ]
-
-            # -------------------------------------------------
-            # Predict BEFORE updating memory.
-            # -------------------------------------------------
+            sender = sender_ids[batch_start:batch_end]
+            receiver = receiver_ids[batch_start:batch_end]
+            transaction = features[batch_start:batch_end]
+            time_delta = delta_t[batch_start:batch_end]
+            timestamp = timestamps[batch_start:batch_end]
+            target = labels[batch_start:batch_end]
 
             logits = model.predict_event(
                 sender_ids=sender,
@@ -487,23 +476,12 @@ def evaluate(
                 delta_t=time_delta,
             )
 
-            probability = torch.sigmoid(
-                logits
+            probabilities.extend(
+                torch.sigmoid(logits).cpu().tolist()
             )
+            true_labels.extend(target.cpu().tolist())
 
-            probabilities.append(
-                probability.item()
-            )
-
-            true_labels.append(
-                target.item()
-            )
-
-            # -------------------------------------------------
-            # After prediction, expose event to memory.
-            # -------------------------------------------------
-
-            model.update_event_memory(
+            model.update_event_memory_batch(
                 sender_ids=sender,
                 receiver_ids=receiver,
                 transaction_features=transaction,
@@ -609,8 +587,9 @@ def train_temporal_tgn():
     # Chronological split
     # -----------------------------------------------------
 
-    split_index = int(
-        len(df) * TRAIN_RATIO
+    split_index = chronological_split_index(
+        df,
+        TRAIN_RATIO,
     )
 
     train_df = df.iloc[
@@ -815,33 +794,18 @@ def train_temporal_tgn():
 
     with torch.no_grad():
 
-        for index in range(
+        for batch_start, batch_end in _timestamp_batch_ranges(
+            timestamps,
             0,
             split_index,
         ):
+            sender = sender_ids[batch_start:batch_end]
+            receiver = receiver_ids[batch_start:batch_end]
+            transaction = features[batch_start:batch_end]
+            time_delta = delta_t[batch_start:batch_end]
+            timestamp = timestamps[batch_start:batch_end]
 
-            sender = sender_ids[
-                index:index + 1
-            ]
-
-            receiver = receiver_ids[
-                index:index + 1
-            ]
-
-            transaction = features[
-                index:index + 1
-            ]
-
-            time_delta = delta_t[
-                index:index + 1
-            ]
-
-            timestamp = timestamps[
-                index:index + 1
-            ]
-
-            # Observe training event.
-            model.update_event_memory(
+            model.update_event_memory_batch(
                 sender_ids=sender,
                 receiver_ids=receiver,
                 transaction_features=transaction,

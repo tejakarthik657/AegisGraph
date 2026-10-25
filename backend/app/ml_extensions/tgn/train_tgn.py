@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+import joblib
 from app.ml_extensions.tgn.message import MessageEncoder
 from app.ml_extensions.tgn.memory import TemporalMemory
 from app.ml_extensions.tgn.time_encoding import TimeEncoder
@@ -18,6 +19,8 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.preprocessing import StandardScaler
+from torch_geometric.nn import GATConv
+import torch.nn.functional as F
 
 
 # ---------------------------------------------------------
@@ -36,17 +39,18 @@ from app.utils.config import (
     create_directories,
 )
 
-from app.ml_extensions.tgn.tgn_model import (
-    TGNFraudModel,
-)
-
-
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
 RANDOM_SEED = 42
 
 TRAIN_RATIO = 0.80
+FORBIDDEN_FEATURE_COLUMNS = {
+    "is_fraud",
+    "typology",
+    "sender_balance_after",
+    "receiver_balance_after",
+}
 
 HIDDEN_DIM = 64
 
@@ -92,8 +96,11 @@ def load_transactions():
         errors="coerce",
     )
 
+    if df["timestamp"].isna().any():
+        raise ValueError("Invalid transaction timestamps detected.")
+
     df = (
-        df.sort_values("timestamp")
+        df.sort_values("timestamp", kind="mergesort")
         .reset_index(drop=True)
     )
 
@@ -102,6 +109,62 @@ def load_transactions():
     )
 
     return df
+
+
+def chronological_train_test_split(
+    df: pd.DataFrame,
+    train_ratio: float = TRAIN_RATIO,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Timestamp]:
+    """Split chronologically without dividing equal-timestamp batches."""
+
+    if not 0 < train_ratio < 1:
+        raise ValueError("train_ratio must be between 0 and 1.")
+    if "timestamp" not in df.columns:
+        raise ValueError("Transactions require a timestamp column.")
+
+    ordered = df.copy()
+    ordered["timestamp"] = pd.to_datetime(
+        ordered["timestamp"],
+        errors="raise",
+    )
+    ordered = ordered.sort_values(
+        "timestamp",
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    split_index = int(len(ordered) * train_ratio)
+    if split_index <= 0 or split_index >= len(ordered):
+        raise ValueError("Chronological split must produce train and test rows.")
+
+    boundary_timestamp = ordered.loc[split_index, "timestamp"]
+    while (
+        split_index < len(ordered)
+        and ordered.loc[split_index - 1, "timestamp"] == boundary_timestamp
+    ):
+        split_index -= 1
+
+    # Move the boundary after the whole tied timestamp group, keeping
+    # all same-time events together and the split near the requested ratio.
+    if split_index == 0:
+        split_index = int(len(ordered) * train_ratio)
+        while (
+            split_index < len(ordered)
+            and ordered.loc[split_index, "timestamp"] == boundary_timestamp
+        ):
+            split_index += 1
+
+    if split_index <= 0 or split_index >= len(ordered):
+        raise ValueError(
+            "Unable to form chronological train/test partitions "
+            "without splitting an equal-timestamp group."
+        )
+
+    train = ordered.iloc[:split_index].copy().reset_index(drop=True)
+    test = ordered.iloc[split_index:].copy().reset_index(drop=True)
+    prediction_timestamp = test["timestamp"].min()
+    if train["timestamp"].max() >= prediction_timestamp:
+        raise ValueError("Train/test split is not strictly chronological.")
+    return train, test, prediction_timestamp
 
 
 # ---------------------------------------------------------
@@ -153,9 +216,7 @@ def create_transaction_features(df):
 
     balance_columns = [
         "sender_balance_before",
-        "sender_balance_after",
         "receiver_balance_before",
-        "receiver_balance_after",
     ]
 
     for column in balance_columns:
@@ -252,6 +313,43 @@ def create_transaction_features(df):
     return features
 
 
+def fit_transaction_preprocessor(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> tuple[StandardScaler, list[str], pd.DataFrame, pd.DataFrame]:
+    """Fit categorical schema and scaling on training transactions only."""
+
+    train_features = create_transaction_features(train_df)
+    test_features = create_transaction_features(test_df)
+    feature_columns = list(train_features.columns)
+
+    forbidden = FORBIDDEN_FEATURE_COLUMNS.intersection(feature_columns)
+    if forbidden:
+        raise ValueError(
+            f"Forbidden account-TGN model features: {sorted(forbidden)}"
+        )
+
+    test_features = test_features.reindex(
+        columns=feature_columns,
+        fill_value=0.0,
+    )
+
+    scaler = StandardScaler()
+    scaler.fit(train_features)
+
+    scaled_train = pd.DataFrame(
+        scaler.transform(train_features),
+        columns=feature_columns,
+        index=train_df.index,
+    )
+    scaled_test = pd.DataFrame(
+        scaler.transform(test_features),
+        columns=feature_columns,
+        index=test_df.index,
+    )
+    return scaler, feature_columns, scaled_train, scaled_test
+
+
 # ---------------------------------------------------------
 # Create temporal edge graph
 # ---------------------------------------------------------
@@ -308,7 +406,7 @@ def create_temporal_features(
         dtype=np.float32,
     )
 
-    # Normalize transaction timestamps
+    # Normalize timestamps using the supplied history only.
     timestamps = (
         df["timestamp"]
         .astype("int64")
@@ -373,6 +471,7 @@ def build_node_features(
     transaction_features,
     df,
     account_to_index,
+    prediction_timestamp=None,
 ):
     """
     Aggregate transaction information into account-level
@@ -383,6 +482,16 @@ def build_node_features(
     Transaction features are aggregated over the
     transactions involving that account.
     """
+
+    if prediction_timestamp is not None:
+        prediction_timestamp = pd.Timestamp(prediction_timestamp)
+        eligible = df["timestamp"] < prediction_timestamp
+        df = df.loc[eligible].copy()
+        transaction_features = transaction_features.loc[
+            eligible
+        ].copy()
+        df = df.reset_index(drop=True)
+        transaction_features = transaction_features.reset_index(drop=True)
 
     number_of_accounts = len(
         account_to_index
@@ -464,8 +573,7 @@ def build_node_labels(
     An account is considered fraud-positive if it
     participates in at least one fraudulent transaction.
 
-    This is used only for the initial graph-level
-    training experiment.
+    Labels must be built from the training partition only.
     """
 
     labels = np.zeros(
@@ -491,10 +599,83 @@ def build_node_labels(
     return labels
 
 
+def build_test_node_labels(
+    test_df: pd.DataFrame,
+    account_to_index: dict,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build held-out labels and node indices for test-active known accounts."""
+
+    labels_by_account = np.zeros(
+        len(account_to_index),
+        dtype=np.float32,
+    )
+    active_nodes = set()
+
+    for _, row in test_df.iterrows():
+        for account in (
+            row["sender_account"],
+            row["receiver_account"],
+        ):
+            node = account_to_index.get(account)
+            if node is not None:
+                active_nodes.add(node)
+                if int(row["is_fraud"]) == 1:
+                    labels_by_account[node] = 1.0
+
+    node_indices = np.asarray(sorted(active_nodes), dtype=np.int64)
+    return node_indices, labels_by_account[node_indices]
+
+
+# ---------------------------------------------------------
+# Account-level graph classifier
+# ---------------------------------------------------------
+class AccountTGNClassifier(nn.Module):
+    """Graph-attention classifier for a train-period account snapshot."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = HIDDEN_DIM,
+    ):
+        super().__init__()
+        self.input_projection = nn.Linear(input_dim, hidden_dim)
+        self.time_encoder = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.gat1 = GATConv(
+            hidden_dim,
+            hidden_dim,
+            heads=2,
+            concat=False,
+            dropout=0.2,
+        )
+        self.gat2 = GATConv(
+            hidden_dim,
+            hidden_dim,
+            heads=2,
+            concat=False,
+            dropout=0.2,
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+    def forward(self, x, edge_index, timestamps):
+        x = self.input_projection(x) + self.time_encoder(timestamps)
+        x = F.relu(self.gat1(x, edge_index))
+        x = F.relu(self.gat2(x, edge_index))
+        return self.classifier(x).squeeze(-1)
+
+
 # ---------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------
-def train_tgn():
+def _legacy_train_tgn():
 
     create_directories()
 
@@ -988,6 +1169,205 @@ def train_tgn():
     print(
         "========================================"
     )
+
+
+def train_tgn():
+    """Train the legacy account-level model and evaluate held-out accounts."""
+
+    create_directories()
+    df = load_transactions()
+    train_df, test_df, prediction_timestamp = (
+        chronological_train_test_split(df)
+    )
+
+    print(
+        "\n========== CHRONOLOGICAL ACCOUNT-TGN SPLIT =========="
+    )
+    print(
+        f"Training transactions: {len(train_df)} "
+        f"({train_df['timestamp'].min()} to {train_df['timestamp'].max()})"
+    )
+    print(
+        f"Testing transactions: {len(test_df)} "
+        f"({test_df['timestamp'].min()} to {test_df['timestamp'].max()})"
+    )
+    print(f"Prediction snapshot: {prediction_timestamp}")
+
+    # All learned graph structure, account IDs, and node features come
+    # from the training period. Test labels are created separately below.
+    account_to_index = create_account_mapping(train_df)
+    scaler, feature_columns, scaled_train, _ = (
+        fit_transaction_preprocessor(train_df, test_df)
+    )
+    node_features_array = build_node_features(
+        scaled_train,
+        train_df,
+        account_to_index,
+        prediction_timestamp=prediction_timestamp,
+    )
+    train_labels_array = build_node_labels(
+        train_df,
+        account_to_index,
+    )
+    edge_index = create_graph(train_df, account_to_index)
+    account_timestamps = create_temporal_features(
+        train_df,
+        account_to_index,
+    )
+
+    x = torch.tensor(node_features_array, dtype=torch.float32, device=DEVICE)
+    y_train = torch.tensor(
+        train_labels_array,
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+    edge_index = edge_index.to(DEVICE)
+    account_timestamps = account_timestamps.to(DEVICE)
+
+    model = AccountTGNClassifier(
+        input_dim=x.shape[1],
+        hidden_dim=HIDDEN_DIM,
+    ).to(DEVICE)
+    positive_count = float(y_train.sum().item())
+    negative_count = float(len(y_train) - positive_count)
+    pos_weight = (
+        negative_count / positive_count
+        if positive_count > 0
+        else 1.0
+    )
+    criterion = nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor(pos_weight, device=DEVICE)
+    )
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
+    )
+
+    model.train()
+    for epoch in range(1, EPOCHS + 1):
+        optimizer.zero_grad()
+        logits = model(x, edge_index, account_timestamps)
+        loss = criterion(logits, y_train)
+        loss.backward()
+        optimizer.step()
+        if epoch == 1 or epoch % 5 == 0 or epoch == EPOCHS:
+            print(f"Epoch {epoch:03d}/{EPOCHS} | Loss: {loss.item():.4f}")
+
+    model.eval()
+    with torch.no_grad():
+        all_probabilities = torch.sigmoid(
+            model(x, edge_index, account_timestamps)
+        ).cpu().numpy()
+
+    # Test labels are first constructed after fitting and inference;
+    # they are used exclusively to evaluate the held-out predictions.
+    test_node_indices, test_labels_array = build_test_node_labels(
+        test_df,
+        account_to_index,
+    )
+    if len(test_node_indices) == 0:
+        raise ValueError(
+            "No test-period accounts were observed during training; "
+            "account-level evaluation is not possible."
+        )
+
+    test_probabilities = all_probabilities[test_node_indices]
+    test_predictions = (test_probabilities >= 0.5).astype(int)
+    y_true = test_labels_array.astype(int)
+    tn, fp, fn, tp = confusion_matrix(
+        y_true,
+        test_predictions,
+        labels=[0, 1],
+    ).ravel()
+    precision = precision_score(y_true, test_predictions, zero_division=0)
+    recall = recall_score(y_true, test_predictions, zero_division=0)
+    f1 = f1_score(y_true, test_predictions, zero_division=0)
+    if len(np.unique(y_true)) == 2:
+        roc_auc = roc_auc_score(y_true, test_probabilities)
+        pr_auc = average_precision_score(y_true, test_probabilities)
+    else:
+        roc_auc = float("nan")
+        pr_auc = float("nan")
+
+    print("\n========== HELD-OUT ACCOUNT EVALUATION ==========")
+    print(f"Test accounts: {len(y_true)}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall:    {recall:.4f}")
+    print(f"F1:        {f1:.4f}")
+    print(f"ROC-AUC:   {roc_auc:.4f}")
+    print(f"PR-AUC:    {pr_auc:.4f}")
+    print("Confusion matrix [TN FP; FN TP]:")
+    print(np.array([[tn, fp], [fn, tp]]))
+    print(
+        classification_report(
+            y_true,
+            test_predictions,
+            zero_division=0,
+        )
+    )
+
+    index_to_account = {
+        index: account
+        for account, index in account_to_index.items()
+    }
+    prediction_df = pd.DataFrame(
+        {
+            "account_id": [
+                index_to_account[int(index)]
+                for index in test_node_indices
+            ],
+            "is_fraud": y_true,
+            "fraud_probability": test_probabilities,
+            "prediction": test_predictions,
+        }
+    )
+    prediction_file = RESULTS_DATA_DIR / "tgn_predictions.csv"
+    prediction_df.to_csv(prediction_file, index=False)
+
+    metrics_df = pd.DataFrame(
+        [
+            {
+                "model": "TGN",
+                "train_transactions": len(train_df),
+                "test_transactions": len(test_df),
+                "test_accounts": len(y_true),
+                "threshold": 0.5,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "roc_auc": roc_auc,
+                "pr_auc": pr_auc,
+                "true_negatives": int(tn),
+                "false_positives": int(fp),
+                "false_negatives": int(fn),
+                "true_positives": int(tp),
+            }
+        ]
+    )
+    metrics_file = RESULTS_DATA_DIR / "tgn_metrics.csv"
+    metrics_df.to_csv(metrics_file, index=False)
+
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "input_dim": len(feature_columns),
+            "hidden_dim": HIDDEN_DIM,
+            "account_to_index": account_to_index,
+        },
+        RESULTS_DATA_DIR / "tgn_model.pt",
+    )
+    joblib.dump(
+        {
+            "scaler": scaler,
+            "feature_columns": feature_columns,
+            "train_end_timestamp": train_df["timestamp"].max(),
+            "prediction_timestamp": prediction_timestamp,
+        },
+        RESULTS_DATA_DIR / "account_tgn_preprocessor.joblib",
+    )
+    print(f"Predictions saved to: {prediction_file}")
+    print(f"Metrics saved to: {metrics_file}")
 
 
 # ---------------------------------------------------------

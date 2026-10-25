@@ -17,10 +17,7 @@ import pandas as pd
 
 from app.rules.aml_rules import (
     check_large_transaction,
-    check_structuring,
-    check_rapid_movement,
-    check_fan_out,
-    check_circular_movement,
+    score_transactions_chronologically,
 )
 
 
@@ -139,82 +136,29 @@ def run_history_rules(
     transactions: pd.DataFrame,
 ) -> list[dict]:
     """
-    Evaluate history-dependent rules against the complete
-    transaction history.
-
-    These rules return account/path-level findings rather than
-    one result for every transaction.
+    Score history-dependent rules causally for each transaction.
     """
 
+    scored = score_transactions_chronologically(transactions)
     results = []
 
-    # -------------------------------------------------------------
-    # Structuring
-    # -------------------------------------------------------------
-
-    structuring = check_structuring(
-        transactions
-    )
-
-    results.append(
-        {
-            "transaction_id": "",
-            "rule": structuring["rule"],
-            "triggered": structuring["triggered"],
-            "reason": structuring["reason"],
-        }
-    )
-
-    # -------------------------------------------------------------
-    # Rapid movement
-    # -------------------------------------------------------------
-
-    rapid_movement = check_rapid_movement(
-        transactions
-    )
-
-    results.append(
-        {
-            "transaction_id": "",
-            "rule": rapid_movement["rule"],
-            "triggered": rapid_movement["triggered"],
-            "reason": rapid_movement["reason"],
-        }
-    )
-
-    # -------------------------------------------------------------
-    # Fan-out
-    # -------------------------------------------------------------
-
-    fan_out = check_fan_out(
-        transactions
-    )
-
-    results.append(
-        {
-            "transaction_id": "",
-            "rule": fan_out["rule"],
-            "triggered": fan_out["triggered"],
-            "reason": fan_out["reason"],
-        }
-    )
-
-    # -------------------------------------------------------------
-    # Circular movement
-    # -------------------------------------------------------------
-
-    circular = check_circular_movement(
-        transactions
-    )
-
-    results.append(
-        {
-            "transaction_id": "",
-            "rule": circular["rule"],
-            "triggered": circular["triggered"],
-            "reason": circular["reason"],
-        }
-    )
+    for rule_name in (
+        "structuring",
+        "rapid_movement",
+        "fan_out",
+        "circular_movement",
+    ):
+        results.extend(
+            {
+                "transaction_id": row["transaction_id"],
+                "rule": rule_name,
+                "triggered": bool(row[rule_name]),
+                "reason": (
+                    "Causal transaction-level rule evaluation"
+                ),
+            }
+            for _, row in scored.iterrows()
+        )
 
     return results
 
@@ -299,9 +243,7 @@ def run_rules() -> pd.DataFrame:
         "Running history-dependent rules..."
     )
 
-    history_results = run_history_rules(
-        rule_data
-    )
+    history_results = run_history_rules(rule_data)
 
     history_results_df = pd.DataFrame(
         history_results

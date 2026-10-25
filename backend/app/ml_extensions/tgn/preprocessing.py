@@ -4,8 +4,8 @@ AegisGraph - Temporal GNN Preprocessing
 Shared preprocessing for TGN training and inference.
 
 IMPORTANT:
-- Keeps the exact 22 transaction features used by train_temporal_tgn.py.
-- Preserves feature ordering.
+- Excludes transaction-completion balance values and label columns.
+- Preserves the fitted feature ordering for inference.
 - Fits StandardScaler ONLY on the chronological training data.
 - Saves the scaler and feature schema so inference can reproduce
   training-time preprocessing exactly.
@@ -26,15 +26,11 @@ from sklearn.preprocessing import StandardScaler
 # Expected feature names
 # ---------------------------------------------------------------------
 
-# These are the exact 22 transaction-level features currently used
-# by the TemporalMemoryTGN training pipeline.
 EXPECTED_FEATURE_COLUMNS: List[str] = [
     "amount",
     "log_amount",
     "sender_balance_before",
-    "sender_balance_after",
     "receiver_balance_before",
-    "receiver_balance_after",
     "amount_to_sender_balance",
     "amount_to_receiver_balance",
     "hour",
@@ -43,6 +39,13 @@ EXPECTED_FEATURE_COLUMNS: List[str] = [
     "month",
     "is_weekend",
 ]
+
+EXCLUDED_FEATURE_COLUMNS = {
+    "sender_balance_after",
+    "receiver_balance_after",
+    "is_fraud",
+    "typology",
+}
 
 
 # ---------------------------------------------------------------------
@@ -71,8 +74,8 @@ def create_transaction_features(
     - channel
     - currency
 
-    Therefore the final number of columns should be 22 for the
-    current dataset/schema.
+    The resulting ordered schema is persisted by ``fit_preprocessor``
+    and reused by inference.
     """
 
     if df.empty:
@@ -81,9 +84,7 @@ def create_transaction_features(
     required_columns = [
         "amount",
         "sender_balance_before",
-        "sender_balance_after",
         "receiver_balance_before",
-        "receiver_balance_after",
         "timestamp",
         "transaction_type",
         "channel",
@@ -144,18 +145,8 @@ def create_transaction_features(
         errors="coerce",
     )
 
-    features["sender_balance_after"] = pd.to_numeric(
-        data["sender_balance_after"],
-        errors="coerce",
-    )
-
     features["receiver_balance_before"] = pd.to_numeric(
         data["receiver_balance_before"],
-        errors="coerce",
-    )
-
-    features["receiver_balance_after"] = pd.to_numeric(
-        data["receiver_balance_after"],
         errors="coerce",
     )
 
@@ -379,16 +370,16 @@ def fit_preprocessor(
     # Create unscaled transaction features.
     raw_features = create_transaction_features(df)
 
-    # Current project expects exactly 22 features.
     feature_columns = list(raw_features.columns)
 
-    if len(feature_columns) != 22:
+    excluded = EXCLUDED_FEATURE_COLUMNS.intersection(feature_columns)
+    if excluded:
         raise ValueError(
-            "Unexpected TGN feature count.\n"
-            f"Expected: 22\n"
-            f"Actual: {len(feature_columns)}\n"
-            f"Columns: {feature_columns}"
+            "TGN feature schema contains excluded columns: "
+            f"{sorted(excluded)}"
         )
+    if not feature_columns:
+        raise ValueError("TGN feature schema is empty.")
 
     # -------------------------------------------------------------
     # Fit scaler ONLY on chronological training rows.
@@ -453,6 +444,13 @@ def transform_transaction_features(
     if not feature_columns:
         raise ValueError(
             "feature_columns cannot be empty."
+        )
+
+    excluded = EXCLUDED_FEATURE_COLUMNS.intersection(feature_columns)
+    if excluded:
+        raise ValueError(
+            "Saved TGN feature schema contains excluded columns: "
+            f"{sorted(excluded)}"
         )
 
     raw_features = create_transaction_features(df)
@@ -532,6 +530,13 @@ def save_preprocessor(
     if not feature_columns:
         raise ValueError(
             "Cannot save an empty feature schema."
+        )
+
+    excluded = EXCLUDED_FEATURE_COLUMNS.intersection(feature_columns)
+    if excluded:
+        raise ValueError(
+            "Cannot save a TGN schema containing excluded columns: "
+            f"{sorted(excluded)}"
         )
 
     output_path = Path(output_path)
@@ -677,4 +682,7 @@ if __name__ == "__main__":
     )
 
     print()
-    print("Expected TGN input dimension: 22")
+    print(
+        "TGN input dimension is determined by the "
+        "persisted training feature schema."
+    )

@@ -330,7 +330,8 @@ def predict_event(
     Predict fraud probability for one transaction event.
 
     The prediction is made BEFORE the current event updates
-    temporal memory.
+    temporal memory. For transactions sharing a timestamp, use
+    ``predict_event_batch`` so none can observe another's update.
     """
 
     model.eval()
@@ -387,6 +388,80 @@ def predict_event(
         .cpu()
         .reshape(-1)[0]
     )
+
+
+@torch.no_grad()
+def predict_event_batch(
+    model: TemporalMemoryTGN,
+    sender_ids: torch.Tensor,
+    receiver_ids: torch.Tensor,
+    transaction_features: torch.Tensor,
+    time_delta: torch.Tensor,
+    timestamps: torch.Tensor,
+) -> np.ndarray:
+    """Score a same-timestamp batch, then update memory once for the batch."""
+
+    sender_ids = torch.as_tensor(
+        sender_ids,
+        dtype=torch.long,
+        device=model.memory.memory.device,
+    ).reshape(-1)
+    receiver_ids = torch.as_tensor(
+        receiver_ids,
+        dtype=torch.long,
+        device=model.memory.memory.device,
+    ).reshape(-1)
+    transaction_features = torch.as_tensor(
+        transaction_features,
+        dtype=torch.float32,
+        device=model.memory.memory.device,
+    )
+    if transaction_features.dim() == 1:
+        transaction_features = transaction_features.unsqueeze(0)
+    time_delta = torch.as_tensor(
+        time_delta,
+        dtype=torch.float32,
+        device=model.memory.memory.device,
+    )
+    if time_delta.dim() == 1:
+        time_delta = time_delta.unsqueeze(-1)
+    timestamps = torch.as_tensor(
+        timestamps,
+        device=model.memory.memory.device,
+    ).reshape(-1)
+
+    batch_size = sender_ids.numel()
+    if (
+        batch_size == 0
+        or receiver_ids.numel() != batch_size
+        or transaction_features.shape[0] != batch_size
+        or time_delta.shape[0] != batch_size
+        or timestamps.numel() != batch_size
+    ):
+        raise ValueError(
+            "Inference batch inputs must have the same non-zero length."
+        )
+    if not torch.all(timestamps == timestamps[0]):
+        raise ValueError(
+            "All transactions in an inference batch must share a timestamp."
+        )
+
+    model.eval()
+    logits = model.predict_event(
+        sender_ids=sender_ids,
+        receiver_ids=receiver_ids,
+        transaction_features=transaction_features,
+        delta_t=time_delta,
+    )
+    probabilities = torch.sigmoid(logits).cpu().numpy()
+    model.update_event_memory_batch(
+        sender_ids=sender_ids,
+        receiver_ids=receiver_ids,
+        transaction_features=transaction_features,
+        delta_t=time_delta,
+        timestamps=timestamps,
+    )
+    return probabilities
 
 
 # ---------------------------------------------------------------------
@@ -590,13 +665,6 @@ def validate_inference_setup(
             f"{model_dimensions['input_dim']}\n"
             f"Preprocessor feature count: "
             f"{feature_count}"
-        )
-
-    if feature_count != 22:
-        raise ValueError(
-            "Unexpected TGN feature count:\n"
-            f"Expected: 22\n"
-            f"Actual: {feature_count}"
         )
 
     return {

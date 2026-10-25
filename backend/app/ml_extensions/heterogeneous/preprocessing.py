@@ -46,6 +46,8 @@ NUMERIC_COLUMNS = [
 
 def _validate_transactions(
     transactions: pd.DataFrame,
+    *,
+    allow_empty: bool = False,
 ) -> pd.DataFrame:
     missing = [
         column for column in REQUIRED_COLUMNS
@@ -58,7 +60,7 @@ def _validate_transactions(
             + ", ".join(missing)
         )
 
-    if transactions.empty:
+    if transactions.empty and not allow_empty:
         raise ValueError("Transactions DataFrame is empty.")
 
     df = transactions.copy()
@@ -263,7 +265,10 @@ def build_heterogeneous_graph(
     if history_transactions is None:
         history = targets.copy()
     else:
-        history = _validate_transactions(history_transactions)
+        history = _validate_transactions(
+            history_transactions,
+            allow_empty=True,
+        )
 
         if (
             not history.empty

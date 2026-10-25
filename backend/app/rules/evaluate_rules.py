@@ -22,11 +22,7 @@ from sklearn.metrics import (
 )
 
 from app.rules.aml_rules import (
-    check_circular_movement,
-    check_fan_out,
-    check_large_transaction,
-    check_rapid_movement,
-    check_structuring,
+    score_transactions_chronologically,
 )
 
 
@@ -71,10 +67,9 @@ TRAIN_RATIO = 0.80
 # Load chronological test set
 # ---------------------------------------------------------------------
 
-def load_test_transactions() -> pd.DataFrame:
+def load_transactions() -> pd.DataFrame:
     """
-    Load the cleaned transaction dataset and return the
-    chronological 20% test partition.
+    Load all cleaned transactions in chronological order.
 
     Ground-truth columns are retained here only for evaluation.
     """
@@ -124,20 +119,19 @@ def load_test_transactions() -> pd.DataFrame:
 
     transactions = (
         transactions
-        .sort_values("timestamp")
+        .sort_values("timestamp", kind="mergesort")
         .reset_index(drop=True)
     )
 
-    split_index = int(
-        len(transactions) * TRAIN_RATIO
-    )
+    return transactions
 
-    return (
-        transactions
-        .iloc[split_index:]
-        .copy()
-        .reset_index(drop=True)
-    )
+
+def load_test_transactions() -> pd.DataFrame:
+    """Return the chronological 20% test partition."""
+
+    transactions = load_transactions()
+    split_index = int(len(transactions) * TRAIN_RATIO)
+    return transactions.iloc[split_index:].copy().reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------
@@ -146,6 +140,7 @@ def load_test_transactions() -> pd.DataFrame:
 
 def run_rules_on_test_history(
     test_transactions: pd.DataFrame,
+    prior_history: pd.DataFrame | None = None,
 ) -> dict:
     """
     Run all history-dependent rules using only transaction
@@ -162,99 +157,39 @@ def run_rules_on_test_history(
         "amount",
     ]
 
-    rule_data = test_transactions[
-        rule_input_columns
-    ].copy()
+    test_rule_data = test_transactions[rule_input_columns].copy()
+    if prior_history is not None:
+        history_rule_data = prior_history[rule_input_columns].copy()
+        rule_data = pd.concat(
+            [history_rule_data, test_rule_data],
+            ignore_index=True,
+        )
+    else:
+        rule_data = test_rule_data
 
-    # -------------------------------------------------------------
-    # Large transactions
-    # -------------------------------------------------------------
-
-    large_transaction_ids = set()
-
-    for _, transaction in rule_data.iterrows():
-
-        result = check_large_transaction(
-            transaction
+    if test_rule_data["transaction_id"].duplicated().any():
+        raise ValueError(
+            "Test transactions must have unique transaction IDs."
         )
 
-        if result["triggered"]:
-            large_transaction_ids.update(
-                result["matching_transaction_ids"]
-            )
-
-    # -------------------------------------------------------------
-    # Structuring
-    # -------------------------------------------------------------
-
-    structuring_result = check_structuring(
-        rule_data
-    )
-
-    structuring_ids = set(
-        structuring_result[
-            "matching_transaction_ids"
-        ]
-    )
-
-    # -------------------------------------------------------------
-    # Rapid movement
-    # -------------------------------------------------------------
-
-    rapid_result = check_rapid_movement(
-        rule_data
-    )
-
-    rapid_ids = set(
-        rapid_result[
-            "matching_transaction_ids"
-        ]
-    )
-
-    # -------------------------------------------------------------
-    # Fan-out
-    # -------------------------------------------------------------
-
-    fan_out_result = check_fan_out(
-        rule_data
-    )
-
-    fan_out_ids = set(
-        fan_out_result[
-            "matching_transaction_ids"
-        ]
-    )
-
-    # -------------------------------------------------------------
-    # Circular movement
-    # -------------------------------------------------------------
-
-    circular_result = check_circular_movement(
-        rule_data
-    )
-
-    circular_ids = set(
-        circular_result[
-            "matching_transaction_ids"
-        ]
-    )
+    scored = score_transactions_chronologically(rule_data)
+    test_ids = set(test_rule_data["transaction_id"])
+    scored = scored[scored["transaction_id"].isin(test_ids)]
 
     return {
-        "large_transaction": (
-            large_transaction_ids
-        ),
-        "structuring": (
-            structuring_ids
-        ),
-        "rapid_movement": (
-            rapid_ids
-        ),
-        "fan_out": (
-            fan_out_ids
-        ),
-        "circular_movement": (
-            circular_ids
-        ),
+        rule_name: set(
+            scored.loc[
+                scored[rule_name] == 1,
+                "transaction_id",
+            ]
+        )
+        for rule_name in (
+            "large_transaction",
+            "structuring",
+            "rapid_movement",
+            "fan_out",
+            "circular_movement",
+        )
     }
 
 
@@ -518,8 +453,11 @@ def evaluate_rules() -> None:
     # Load test set
     # -------------------------------------------------------------
 
-    test_transactions = (
-        load_test_transactions()
+    all_transactions = load_transactions()
+    split_index = int(len(all_transactions) * TRAIN_RATIO)
+    prior_history = all_transactions.iloc[:split_index].copy()
+    test_transactions = all_transactions.iloc[split_index:].copy().reset_index(
+        drop=True
     )
 
     print()
@@ -543,7 +481,8 @@ def evaluate_rules() -> None:
     )
 
     rule_matches = run_rules_on_test_history(
-        test_transactions
+        test_transactions,
+        prior_history=prior_history,
     )
 
     # -------------------------------------------------------------

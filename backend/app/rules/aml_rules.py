@@ -101,6 +101,154 @@ def _prepare_transactions(
     return data
 
 
+def score_transactions_chronologically(
+    transactions: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Score each event using only strictly earlier event timestamps.
+
+    Events sharing a timestamp are scored as a batch before any are
+    added to the history. Each target event is available to its own
+    amount-based and cumulative rule checks.
+    """
+
+    data = _prepare_transactions(transactions)
+    data = data.sort_values(
+        "timestamp",
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    score_columns = [
+        "large_transaction",
+        "structuring",
+        "rapid_movement",
+        "fan_out",
+        "circular_movement",
+    ]
+    for column in score_columns:
+        data[column] = 0
+
+    low_value_counts: Dict[str, int] = {}
+    sender_total_amounts: Dict[str, float] = {}
+    sender_receivers: Dict[str, Set[str]] = {}
+    edges_by_pair: Dict[
+        tuple[str, str],
+        list[tuple[pd.Timestamp, float]],
+    ] = {}
+    outgoing_edges: Dict[
+        str,
+        list[tuple[pd.Timestamp, str, float]],
+    ] = {}
+
+    for _, timestamp_group in data.groupby(
+        "timestamp",
+        sort=False,
+    ):
+        batch_scores = []
+
+        for row_index, transaction in timestamp_group.iterrows():
+            sender = transaction["sender_account"]
+            receiver = transaction["receiver_account"]
+            amount = float(transaction["amount"])
+            timestamp = transaction["timestamp"]
+
+            structuring_count = low_value_counts.get(sender, 0)
+            if amount < STRUCTURING_MAX_AMOUNT:
+                structuring_count += 1
+
+            receivers = sender_receivers.get(sender, set())
+            fan_out_receiver_count = len(receivers | {receiver})
+            fan_out_total = (
+                sender_total_amounts.get(sender, 0.0)
+                + amount
+            )
+
+            circular = False
+            if sender != receiver:
+                for first_time, middle_account, first_amount in (
+                    outgoing_edges.get(receiver, ())
+                ):
+                    if (
+                        first_amount < CIRCULAR_MINIMUM_AMOUNT
+                        or timestamp - first_time
+                        > pd.Timedelta(hours=CIRCULAR_WINDOW_HOURS)
+                    ):
+                        continue
+                    second_edges = edges_by_pair.get(
+                        (middle_account, sender),
+                        (),
+                    )
+                    if any(
+                        first_time < second_time < timestamp
+                        for second_time, _ in second_edges
+                    ):
+                        circular = True
+                        break
+
+            batch_scores.append(
+                (
+                    row_index,
+                    int(amount >= LARGE_TRANSACTION_THRESHOLD),
+                    int(
+                        amount < STRUCTURING_MAX_AMOUNT
+                        and structuring_count >= STRUCTURING_MIN_COUNT
+                    ),
+                    int(amount >= RAPID_MOVEMENT_MINIMUM_AMOUNT),
+                    int(
+                        fan_out_receiver_count >= FAN_OUT_MINIMUM_RECEIVERS
+                        and fan_out_total >= FAN_OUT_MINIMUM_TOTAL_AMOUNT
+                    ),
+                    int(circular),
+                )
+            )
+
+        for (
+            row_index,
+            large,
+            structuring,
+            rapid,
+            fan_out,
+            circular,
+        ) in batch_scores:
+            data.loc[row_index, score_columns] = [
+                large,
+                structuring,
+                rapid,
+                fan_out,
+                circular,
+            ]
+
+        for _, transaction in timestamp_group.iterrows():
+            sender = transaction["sender_account"]
+            receiver = transaction["receiver_account"]
+            amount = float(transaction["amount"])
+
+            if amount < STRUCTURING_MAX_AMOUNT:
+                low_value_counts[sender] = (
+                    low_value_counts.get(sender, 0) + 1
+                )
+            sender_total_amounts[sender] = (
+                sender_total_amounts.get(sender, 0.0) + amount
+            )
+            sender_receivers.setdefault(sender, set()).add(receiver)
+            edges_by_pair.setdefault(
+                (sender, receiver),
+                [],
+            ).append(
+                (transaction["timestamp"], amount)
+            )
+            outgoing_edges.setdefault(sender, []).append(
+                (
+                    transaction["timestamp"],
+                    receiver,
+                    amount,
+                )
+            )
+
+    data["rule_prediction"] = data[score_columns].max(axis=1).astype(int)
+    return data
+
+
 # ============================================================
 # RULE 1 — LARGE TRANSACTION
 # ============================================================

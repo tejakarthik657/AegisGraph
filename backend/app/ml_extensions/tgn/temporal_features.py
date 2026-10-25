@@ -2,6 +2,40 @@ import numpy as np
 import pandas as pd
 
 
+def chronological_split_index(
+    df: pd.DataFrame,
+    train_ratio: float = 0.80,
+) -> int:
+    """Choose the nearest chronological boundary without splitting timestamp ties."""
+
+    if not 0 < train_ratio < 1:
+        raise ValueError("train_ratio must be between 0 and 1.")
+    if "timestamp" not in df.columns:
+        raise ValueError("Chronological split requires a timestamp column.")
+
+    timestamps = pd.to_datetime(df["timestamp"], errors="raise")
+    if timestamps.isna().any():
+        raise ValueError("Chronological split cannot include missing timestamps.")
+    if not timestamps.is_monotonic_increasing:
+        raise ValueError("Transactions must be sorted by timestamp before splitting.")
+
+    target = int(len(df) * train_ratio)
+    boundaries = [
+        index
+        for index in range(1, len(df))
+        if timestamps.iloc[index - 1] < timestamps.iloc[index]
+    ]
+    if not boundaries:
+        raise ValueError(
+            "Cannot split transactions without dividing a timestamp batch."
+        )
+
+    return min(
+        boundaries,
+        key=lambda index: (abs(index - target), -index),
+    )
+
+
 def create_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Create event-level temporal features for transactions.
@@ -56,34 +90,38 @@ def create_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
             f"Found {invalid_count} invalid timestamps."
         )
 
-    # Keep original order so the generated features can be
-    # returned in exactly the same order as the input dataframe.
+    # Keep original order so features align with input transactions.
     result["_original_order"] = np.arange(len(result))
 
-    # Temporal calculations must happen chronologically.
-    result = result.sort_values(
-        "timestamp"
-    ).copy()
-
-    # ---------------------------------------------------------
-    # Previous transaction time for sender
-    # ---------------------------------------------------------
-
-    result["_previous_sender_timestamp"] = (
-        result
-        .groupby("sender_account")["timestamp"]
-        .shift(1)
-    )
-
-    # ---------------------------------------------------------
-    # Previous transaction time for receiver
-    # ---------------------------------------------------------
-
-    result["_previous_receiver_timestamp"] = (
-        result
-        .groupby("receiver_account")["timestamp"]
-        .shift(1)
-    )
+    for account_column, previous_column in (
+        ("sender_account", "_previous_sender_timestamp"),
+        ("receiver_account", "_previous_receiver_timestamp"),
+    ):
+        account_events = (
+            result.loc[
+                result[account_column].notna(),
+                [account_column, "timestamp"],
+            ]
+            .drop_duplicates()
+            .sort_values(
+                [account_column, "timestamp"],
+                kind="mergesort",
+            )
+        )
+        account_events[previous_column] = (
+            account_events.groupby(
+                account_column,
+                sort=False,
+            )["timestamp"]
+            .shift(1)
+        )
+        result = result.merge(
+            account_events,
+            on=[account_column, "timestamp"],
+            how="left",
+            sort=False,
+            validate="many_to_one",
+        )
 
     # ---------------------------------------------------------
     # Time since previous sender transaction

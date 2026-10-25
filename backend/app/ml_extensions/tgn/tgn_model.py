@@ -278,6 +278,97 @@ class TemporalMemoryTGN(nn.Module):
                     timestamps=timestamps,
                 )
 
+    def update_event_memory_batch(
+        self,
+        sender_ids,
+        receiver_ids,
+        transaction_features,
+        delta_t,
+        timestamps,
+        track_grad=False,
+    ):
+        """Apply one order-independent memory update for a timestamp batch."""
+
+        sender_ids = sender_ids.reshape(-1)
+        receiver_ids = receiver_ids.reshape(-1)
+        timestamps = timestamps.reshape(-1)
+        if (
+            sender_ids.numel() == 0
+            or sender_ids.shape != receiver_ids.shape
+            or sender_ids.shape != timestamps.shape
+        ):
+            raise ValueError(
+                "Timestamp-batched events require matching, non-empty "
+                "sender, receiver, and timestamp vectors."
+            )
+        if not torch.all(timestamps == timestamps[0]):
+            raise ValueError(
+                "All events in a memory update batch must share a timestamp."
+            )
+
+        _, _, _, messages = self.encode_event(
+            sender_ids=sender_ids,
+            receiver_ids=receiver_ids,
+            transaction_features=transaction_features,
+            delta_t=delta_t,
+        )
+
+        event_nodes = torch.cat((sender_ids, receiver_ids))
+        event_messages = torch.cat((messages, messages), dim=0)
+        keep = torch.cat(
+            (torch.ones_like(sender_ids, dtype=torch.bool),
+             sender_ids != receiver_ids)
+        )
+        event_nodes = event_nodes[keep]
+        event_messages = event_messages[keep]
+
+        unique_nodes, inverse = torch.unique(
+            event_nodes,
+            sorted=True,
+            return_inverse=True,
+        )
+        aggregated_messages = event_messages.new_zeros(
+            (unique_nodes.numel(), event_messages.shape[-1])
+        )
+        aggregated_messages.index_add_(
+            0,
+            inverse,
+            event_messages,
+        )
+        message_counts = event_messages.new_zeros(
+            unique_nodes.numel()
+        )
+        message_counts.index_add_(
+            0,
+            inverse,
+            event_messages.new_ones(inverse.numel()),
+        )
+        aggregated_messages = (
+            aggregated_messages / message_counts.unsqueeze(-1)
+        )
+
+        previous_memory = self.memory.get_memory(unique_nodes)
+        updated_memory = self.memory.memory_updater(
+            aggregated_messages,
+            previous_memory,
+        )
+        batch_timestamps = timestamps[0].expand(
+            unique_nodes.numel()
+        ).to(self.memory.last_update.dtype)
+
+        if track_grad:
+            self.memory.commit_memory_with_grad(
+                node_ids=unique_nodes,
+                new_memory=updated_memory,
+                timestamps=batch_timestamps,
+            )
+        else:
+            self.memory.commit_memory(
+                node_ids=unique_nodes,
+                new_memory=updated_memory,
+                timestamps=batch_timestamps,
+            )
+
     # ---------------------------------------------------------
     # Reset memory
     # ---------------------------------------------------------

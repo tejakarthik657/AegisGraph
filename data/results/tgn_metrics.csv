@@ -1,2 +1,2 @@
-model,precision,recall,f1,roc_auc,pr_auc
-TGN,0.2994652406417112,0.4072727272727273,0.34514637904468415,0.6746017497147205,0.44082127341039823
+model,train_transactions,test_transactions,test_accounts,threshold,precision,recall,f1,roc_auc,pr_auc,true_negatives,false_positives,false_negatives,true_positives
+TGN,8158,2040,1369,0.5,0.04461942257217848,0.265625,0.07640449438202247,0.4895593869731801,0.04701320046915443,941,364,47,17

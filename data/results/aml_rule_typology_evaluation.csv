@@ -1,5 +1,5 @@
 typology,total,rule_detected,rule_recall,rule_missed
-circular,12,8,0.6666666666666666,4
+circular,12,12,1.0,0
 fan_out,10,10,1.0,0
 rapid_movement,10,10,1.0,0
-structuring,11,4,0.36363636363636365,7
+structuring,11,11,1.0,0
