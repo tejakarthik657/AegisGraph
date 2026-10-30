@@ -1,8 +1,49 @@
 import { useEffect, useMemo, useState } from "react";
 import api from "../services/api";
 
+const evaluationMetricColumns = [
+  ["precision", "Precision"],
+  ["recall", "Recall"],
+  ["f1", "F1-score"],
+  ["roc_auc", "ROC-AUC"],
+  ["pr_auc", "PR-AUC / Average Precision"],
+  ["accuracy", "Accuracy"],
+];
+
+function displayMetric(value) {
+  return value === null || value === undefined
+    ? "N/A"
+    : String(value);
+}
+
+function evaluationDescription(model) {
+  const details = [];
+
+  if (model.threshold !== null && model.threshold !== undefined) {
+    details.push(`Threshold: ${model.threshold}`);
+  }
+
+  for (const [field, label] of [
+    ["train_transactions", "Train transactions"],
+    ["test_transactions", "Test transactions"],
+    ["test_accounts", "Test accounts"],
+    ["test_frauds", "Test frauds"],
+    ["test_fraud", "Test frauds"],
+  ]) {
+    const value = model.evaluation?.[field];
+    if (value !== null && value !== undefined) {
+      details.push(`${label}: ${value}`);
+    }
+  }
+
+  return details.length > 0
+    ? details.join(" · ")
+    : "Evaluation dataset metadata not present in the source file.";
+}
+
 export default function Performance() {
   const [summary, setSummary] = useState(null);
+  const [modelMetrics, setModelMetrics] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -14,18 +55,22 @@ export default function Performance() {
         setLoading(true);
         setError("");
 
-        const response = await api.get("/summary");
+        const [summaryResponse, metricsResponse] = await Promise.all([
+          api.get("/summary"),
+          api.get("/model-metrics"),
+        ]);
 
         if (active) {
-          setSummary(response.data);
+          setSummary(summaryResponse.data);
+          setModelMetrics(metricsResponse.data.models || []);
         }
       } catch (err) {
-        console.error("Failed to load monitoring summary:", err);
+        console.error("Failed to load performance data:", err);
 
         if (active) {
           setError(
             err?.response?.data?.detail ||
-              "Unable to load monitoring metrics."
+              "Unable to load performance data."
           );
         }
       } finally {
@@ -98,12 +143,16 @@ export default function Performance() {
       setLoading(true);
       setError("");
 
-      const response = await api.get("/summary");
-      setSummary(response.data);
+      const [summaryResponse, metricsResponse] = await Promise.all([
+        api.get("/summary"),
+        api.get("/model-metrics"),
+      ]);
+      setSummary(summaryResponse.data);
+      setModelMetrics(metricsResponse.data.models || []);
     } catch (err) {
       setError(
         err?.response?.data?.detail ||
-          "Unable to load monitoring metrics."
+          "Unable to load performance data."
       );
     } finally {
       setLoading(false);
@@ -137,6 +186,10 @@ export default function Performance() {
 
   const totalTransactions = Number(
     summary.risk?.total_transactions || 0
+  );
+
+  const totalDatasetTransactions = Number(
+    summary.dataset.total_transactions
   );
 
   const totalAlerts = Number(summary.alerts?.total || 0);
@@ -178,11 +231,23 @@ export default function Performance() {
       <div className="performance-metric-grid">
         <article className="performance-metric-card">
           <div className="performance-metric-label">
-            Transactions Analyzed
+            Total Dataset Transactions
+          </div>
+          <strong>
+            {totalDatasetTransactions.toLocaleString("en-IN")}
+          </strong>
+          <span className="performance-metric-description">
+            Transactions in the complete cleaned dataset
+          </span>
+        </article>
+
+        <article className="performance-metric-card">
+          <div className="performance-metric-label">
+            Transactions Scored
           </div>
           <strong>{totalTransactions.toLocaleString("en-IN")}</strong>
           <span className="performance-metric-description">
-            Transactions represented in the risk summary
+            Transactions with final risk-fusion scores
           </span>
         </article>
 
@@ -216,6 +281,92 @@ export default function Performance() {
           </span>
         </article>
       </div>
+
+      <section className="performance-panel performance-model-metrics">
+        <div className="performance-panel-header">
+          <div>
+            <h2>Model Evaluation Metrics</h2>
+            <p>
+              Offline evaluation results read from the saved backend CSV
+              files. Values are shown at the precision stored in each file
+              and are not live transaction risk scores.
+            </p>
+          </div>
+        </div>
+
+        <div className="performance-model-metrics-table-wrapper">
+          <table className="performance-model-metrics-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                {evaluationMetricColumns.map(([, label]) => (
+                  <th key={label}>{label}</th>
+                ))}
+                <th>Evaluation setup</th>
+              </tr>
+            </thead>
+            <tbody>
+              {modelMetrics.map((model) => (
+                <tr key={model.key}>
+                  <th scope="row">
+                    <span>{model.model_name}</span>
+                    <small>
+                      {model.available
+                        ? model.source_file
+                        : "Evaluation file unavailable"}
+                    </small>
+                  </th>
+                  {evaluationMetricColumns.map(([field]) => (
+                    <td key={field}>
+                      {displayMetric(model.metrics?.[field])}
+                    </td>
+                  ))}
+                  <td>{evaluationDescription(model)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {modelMetrics.find((model) => model.key === "aml_rules")
+          ?.rules?.length > 0 && (
+          <div className="performance-rule-metrics">
+            <h3>AML Rule Detection — Individual Rules</h3>
+            <div className="performance-model-metrics-table-wrapper">
+              <table className="performance-model-metrics-table">
+                <thead>
+                  <tr>
+                    <th>Rule</th>
+                    {evaluationMetricColumns.map(([, label]) => (
+                      <th key={label}>{label}</th>
+                    ))}
+                    <th>Test transactions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {modelMetrics
+                    .find((model) => model.key === "aml_rules")
+                    .rules.map((rule) => (
+                      <tr key={rule.rule_name}>
+                        <th scope="row">{rule.rule_name}</th>
+                        {evaluationMetricColumns.map(([field]) => (
+                          <td key={field}>
+                            {displayMetric(rule.metrics?.[field])}
+                          </td>
+                        ))}
+                        <td>
+                          {displayMetric(
+                            rule.evaluation?.test_transactions
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </section>
 
       <div className="performance-content-grid">
         <section className="performance-panel">
@@ -255,7 +406,7 @@ export default function Performance() {
                 </div>
 
                 <div className="performance-risk-percentage">
-                  {item.percentage.toFixed(2)}% of analyzed transactions
+                    {item.percentage.toFixed(2)}% of scored transactions
                 </div>
               </div>
             ))}
@@ -322,7 +473,7 @@ export default function Performance() {
               <strong>Risk Assessment</strong>
               <p>
                 {totalTransactions.toLocaleString("en-IN")} transactions
-                categorized
+                scored and categorized
               </p>
             </div>
           </div>
@@ -361,7 +512,8 @@ export default function Performance() {
         <div className="performance-data-note">
           These figures reflect the current summary endpoint. They are
           aggregate counts, not live throughput, latency, or model-quality
-          measurements.
+          measurements. The model evaluation metrics above are offline
+          evaluation snapshots from the source CSVs.
         </div>
       </section>
     </section>

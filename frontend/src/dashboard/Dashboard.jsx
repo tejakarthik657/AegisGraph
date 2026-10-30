@@ -5,29 +5,29 @@ import { getSummary } from "../services/api";
 const activityPatterns = [
   {
     name: "Rapid Movement",
-    count: 20,
+    key: "rapid_movement",
     description: "Fast movement of funds through accounts.",
   },
   {
     name: "Fan-out",
-    count: 13,
+    key: "fan_out",
     description: "Funds distributed to multiple accounts.",
   },
   {
     name: "Structuring",
-    count: 12,
+    key: "structuring",
     description:
       "Transactions showing possible threshold avoidance.",
   },
   {
     name: "Large Transaction",
-    count: 10,
+    key: "large_transaction",
     description:
       "Transactions exceeding the configured amount threshold.",
   },
   {
     name: "Circular Movement",
-    count: 3,
+    key: "circular_movement",
     description:
       "Funds moving through a circular account relationship.",
   },
@@ -142,7 +142,7 @@ function RiskOverview({ categories, total }) {
   );
 }
 
-function ActivityPatterns() {
+function ActivityPatterns({ counts }) {
   return (
     <section className="dashboard-section">
       <div className="section-heading">
@@ -173,7 +173,7 @@ function ActivityPatterns() {
             </div>
 
             <div className="activity-count">
-              {pattern.count}
+              {counts[pattern.key].toLocaleString()}
             </div>
           </div>
         ))}
@@ -359,6 +359,9 @@ export default function Dashboard() {
   const totalTransactions =
     summary.risk.total_transactions;
 
+  const totalDatasetTransactions =
+    summary.dataset.total_transactions;
+
   const riskCategories =
     summary.risk.categories;
 
@@ -396,9 +399,15 @@ export default function Dashboard() {
 
       <div className="dashboard-metrics">
         <MetricCard
-          label="Transactions Analyzed"
+          label="Total Dataset Transactions"
+          value={totalDatasetTransactions}
+          description="Transactions in the complete cleaned dataset."
+        />
+
+        <MetricCard
+          label="Transactions Scored"
           value={totalTransactions}
-          description="Transactions evaluated by the current risk detection pipeline."
+          description="Transactions with available final risk scores from the detection pipeline."
         />
 
         <MetricCard
@@ -429,7 +438,9 @@ export default function Dashboard() {
       />
 
       <div className="dashboard-two-column">
-        <ActivityPatterns />
+        <ActivityPatterns
+          counts={summary.activity_patterns}
+        />
 
         <InvestigationFocus
           priority={priority}

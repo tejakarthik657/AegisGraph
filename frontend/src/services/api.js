@@ -25,6 +25,11 @@ export async function getSummary() {
   return response.data;
 }
 
+export async function getModelMetrics() {
+  const response = await api.get("/model-metrics");
+  return response.data;
+}
+
 export async function getRiskSummary() {
   const response = await api.get("/risk-summary");
   return response.data;
@@ -37,6 +42,21 @@ export async function getRiskSummary() {
 export async function getTransactions(params = {}) {
   const response = await api.get("/transactions", { params });
   return response.data;
+}
+
+export async function getTransactionById(transactionId) {
+  const response = await api.get("/transactions", {
+    params: {
+      page: 1,
+      page_size: 100,
+      search: transactionId,
+    },
+  });
+
+  return response.data.transactions.find(
+    (transaction) =>
+      String(transaction.transaction_id) === String(transactionId)
+  ) || null;
 }
 
 // ============================================================

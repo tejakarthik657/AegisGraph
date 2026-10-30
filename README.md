@@ -188,3 +188,8 @@ Each module exposes a stable public interface, so upgrades are drop-in replaceme
 ## Disclaimer
 
 All data in this project is synthetic. No real customer, account, or transaction data is used. The regulatory reference notes are original illustrative text and are **not** verbatim excerpts of any actual law or regulation. Any generated report is explicitly labeled a draft for human compliance review and is not, and must never be treated as, a filed Suspicious Activity Report (SAR).
+
+py
+cd backend
+.\venv312\Scripts\Activate.ps1
+python -m uvicorn app.main:app --reload

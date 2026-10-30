@@ -17,8 +17,14 @@ import {
   getCase,
   getCases,
   getInvestigationGraph,
+  getTransactionById,
   submitCaseReview,
 } from "../services/api";
+import {
+  formatScorePercentage,
+  getScorePercentage,
+  mergeTransactionRiskScores,
+} from "../utils/riskScores";
 
 
 
@@ -45,9 +51,7 @@ function formatAmount(amount) {
 
 
 function formatPercentage(value) {
-
-  return `${(Number(value || 0) * 100).toFixed(1)}%`;
-
+  return formatScorePercentage(value);
 }
 
 
@@ -122,9 +126,11 @@ function formatPattern(value) {
 
 function RiskBadge({ category }) {
 
+  const riskCategory = category || "Not scored";
+
   const normalized =
 
-    String(category || "UNKNOWN").toLowerCase();
+    String(riskCategory).toLowerCase();
 
 
 
@@ -140,7 +146,7 @@ function RiskBadge({ category }) {
 
 
 
-      {category}
+      {riskCategory}
 
     </span>
 
@@ -548,21 +554,10 @@ function SignalBar({
 
 }) {
 
-  const percentage =
-
-    Math.max(
-
-      0,
-
-      Math.min(
-
-        100,
-
-        Number(value || 0) * 100
-
-      )
-
-    );
+  const scorePercentage = getScorePercentage(value);
+  const percentage = scorePercentage === null
+    ? null
+    : Math.max(0, Math.min(100, scorePercentage));
 
 
 
@@ -578,7 +573,9 @@ function SignalBar({
 
         <strong>
 
-          {percentage.toFixed(1)}%
+          {percentage === null
+            ? "Not scored"
+            : `${percentage.toFixed(2)}%`}
 
         </strong>
 
@@ -594,7 +591,7 @@ function SignalBar({
 
           style={{
 
-            width: `${percentage}%`,
+            width: percentage === null ? "0%" : `${percentage}%`,
 
           }}
 
@@ -793,7 +790,13 @@ export default function InvestigationWorkspace() {
 
           await getAlert(alertId);
 
-
+        const transaction = await getTransactionById(
+          alertData.transaction_id
+        );
+        const riskEvidence = mergeTransactionRiskScores(
+          alertData,
+          transaction
+        );
 
         if (!mounted) {
 
@@ -803,7 +806,7 @@ export default function InvestigationWorkspace() {
 
 
 
-        setAlert(alertData);
+        setAlert(riskEvidence);
 
         const graphData = await getInvestigationGraph(alertData.alert_id);
 
@@ -875,7 +878,12 @@ export default function InvestigationWorkspace() {
 
 
 
-        setCaseData(detailedCase);
+        setCaseData(
+          mergeTransactionRiskScores(
+            detailedCase,
+            transaction || alertData
+          )
+        );
 
       } catch (err) {
 
@@ -1512,7 +1520,7 @@ export default function InvestigationWorkspace() {
 
               <SignalBar
 
-                label="Temporal Graph Model"
+                label="Temporal Graph Network (TGN)"
 
                 value={
 
@@ -1526,11 +1534,16 @@ export default function InvestigationWorkspace() {
 
               />
 
-
+              <SignalBar
+                label="Temporal Heterogeneous Graph Neural Network (THGNN)"
+                value={caseData.thgnn_probability}
+                description="Probability assigned by the temporal heterogeneous graph model."
+                type="teal"
+              />
 
               <SignalBar
 
-                label="Rule Detection"
+                label="AML Rule Score"
 
                 value={
 

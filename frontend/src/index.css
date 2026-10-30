@@ -1978,6 +1978,14 @@ a {
   border-top: 3px solid #dc2626;
 }
 
+.evidence-teal {
+  border-top: 3px solid #0f766e;
+}
+
+.evidence-gray {
+  border-top: 3px solid #64748b;
+}
+
 /* =========================================
    DETECTION RULES
 ========================================= */
@@ -2987,6 +2995,10 @@ a {
 
 .workspace-signal-fill.orange {
   background: #d97706;
+}
+
+.workspace-signal-fill.teal {
+  background: #0f766e;
 }
 
 .workspace-signal-description {
@@ -4738,6 +4750,28 @@ a {
   font-weight: 700;
 }
 
+.transaction-id-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #2563eb;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.transaction-id-button:hover,
+.transaction-id-button[aria-pressed="true"] {
+  color: #1d4ed8;
+  text-decoration: underline;
+}
+
+.transaction-id-button:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 3px;
+}
+
 .transaction-fraud-dot {
   width: 6px;
   height: 6px;
@@ -4809,6 +4843,12 @@ a {
 .transaction-risk-fraud {
   background: #fef2f2;
   color: #b91c1c;
+}
+
+.transaction-risk-details {
+  margin: 0;
+  padding: 20px;
+  border-bottom: 1px solid #e2e8f0;
 }
 
 
@@ -5688,7 +5728,7 @@ a {
 
 .performance-metric-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 20px;
 }
@@ -5745,6 +5785,65 @@ a {
   border-radius: 10px;
   background: #ffffff;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+
+.performance-model-metrics {
+  margin-bottom: 20px;
+}
+
+.performance-model-metrics-table-wrapper {
+  overflow-x: auto;
+}
+
+.performance-model-metrics-table {
+  width: 100%;
+  min-width: 1050px;
+  border-collapse: collapse;
+}
+
+.performance-model-metrics-table th,
+.performance-model-metrics-table td {
+  padding: 11px 12px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #475569;
+  font-size: 11px;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.performance-model-metrics-table thead th {
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.performance-model-metrics-table tbody th {
+  color: #172033;
+  font-weight: 700;
+}
+
+.performance-model-metrics-table tbody th small {
+  display: block;
+  margin-top: 4px;
+  color: #94a3b8;
+  font-size: 9px;
+  font-weight: 400;
+}
+
+.performance-model-metrics-table tbody td:last-child {
+  white-space: normal;
+}
+
+.performance-rule-metrics {
+  margin-top: 24px;
+}
+
+.performance-rule-metrics h3 {
+  margin: 0 0 12px;
+  color: #172033;
+  font-size: 13px;
 }
 
 .performance-panel-header {

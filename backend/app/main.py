@@ -5,13 +5,13 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes.cases_routes import router as case_management_router
+from app.rules.aml_rules import score_transactions_chronologically
 
 # ============================================================
 # PROJECT PATHS
 # ============================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
 RESULTS_DIR = PROJECT_ROOT / "data" / "results"
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 
@@ -22,6 +22,7 @@ PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 TRANSACTIONS_FILE = (
     PROCESSED_DIR / "transactions_clean.csv"
 )
+
 
 _transaction_dataframe = None
 
@@ -73,6 +74,49 @@ CASES_FILE = RESULTS_DIR / "investigation_cases.csv"
 REVIEWS_FILE = RESULTS_DIR / "case_reviews.csv"
 DOSSIERS_FILE = RESULTS_DIR / "investigation_dossiers.csv"
 RISK_FILE = RESULTS_DIR / "risk_fusion_predictions.csv"
+AML_RULE_RESULTS_FILE = RESULTS_DIR / "aml_rule_results.csv"
+MODEL_METRIC_SOURCES = (
+    {
+        "key": "random_forest",
+        "name": "Random Forest",
+        "file": RESULTS_DIR / "model_metrics.csv",
+    },
+    {
+        "key": "tgn",
+        "name": "Temporal Graph Network (TGN)",
+        "file": RESULTS_DIR / "tgn_metrics.csv",
+    },
+    {
+        "key": "thgnn",
+        "name": (
+            "Temporal Heterogeneous Graph Neural Network (THGNN)"
+        ),
+        "file": RESULTS_DIR / "thgnn_metrics.csv",
+    },
+    {
+        "key": "aml_rules",
+        "name": "AML Rule Detection",
+        "file": RESULTS_DIR / "aml_rule_evaluation.csv",
+    },
+    {
+        "key": "risk_fusion",
+        "name": "Risk Fusion",
+        "file": RESULTS_DIR / "risk_fusion_metrics.csv",
+    },
+)
+AML_RULE_METRICS_FILE = (
+    RESULTS_DIR / "aml_individual_rule_metrics.csv"
+)
+
+ACTIVITY_RULES = (
+    "rapid_movement",
+    "fan_out",
+    "structuring",
+    "large_transaction",
+    "circular_movement",
+)
+
+_activity_pattern_counts = None
 
 NETWORK_GRAPH_FILE = (
     PROCESSED_DIR / "transaction_graph.graphml"
@@ -180,6 +224,297 @@ def load_csv(file_path: Path):
                 f"{exc}"
             ),
         )
+
+
+def metric_value(row, column):
+    if column not in row:
+        return None
+
+    value = row[column]
+    if pd.isna(value):
+        return None
+
+    if hasattr(value, "item"):
+        return value.item()
+
+    return value
+
+
+def read_evaluation_metric(file_path, model_name):
+    metric_names = (
+        "precision",
+        "recall",
+        "f1",
+        "roc_auc",
+        "pr_auc",
+        "accuracy",
+    )
+    evaluation_fields = (
+        "train_transactions",
+        "test_transactions",
+        "test_accounts",
+        "test_frauds",
+        "test_fraud",
+    )
+    result = {
+        "key": next(
+            source["key"]
+            for source in MODEL_METRIC_SOURCES
+            if source["file"] == file_path
+        ),
+        "model_name": model_name,
+        "available": False,
+        "source_file": file_path.name,
+        "metrics": {
+            metric: None
+            for metric in metric_names
+        },
+        "threshold": None,
+        "evaluation": {},
+    }
+
+    if not file_path.exists():
+        return result
+
+    metrics_df = load_csv(file_path)
+    if metrics_df.empty:
+        return result
+
+    row = metrics_df.iloc[0]
+    source_model_name = metric_value(row, "model")
+    if source_model_name:
+        result["source_model_name"] = str(source_model_name)
+
+    result["available"] = True
+    result["metrics"] = {
+        metric: metric_value(row, metric)
+        for metric in metric_names
+    }
+    result["threshold"] = metric_value(row, "threshold")
+    result["evaluation"] = {
+        field: metric_value(row, field)
+        for field in evaluation_fields
+        if field in metrics_df.columns
+    }
+    return result
+
+
+def model_metrics():
+    models = [
+        read_evaluation_metric(
+            source["file"],
+            source["name"],
+        )
+        for source in MODEL_METRIC_SOURCES
+    ]
+
+    aml_rules = next(
+        model
+        for model in models
+        if model["key"] == "aml_rules"
+    )
+    aml_rules["rules"] = []
+
+    if AML_RULE_METRICS_FILE.exists():
+        rule_metrics_df = load_csv(AML_RULE_METRICS_FILE)
+        rule_metric_columns = (
+            "accuracy",
+            "precision",
+            "recall",
+            "f1",
+            "roc_auc",
+            "pr_auc",
+        )
+        rule_evaluation_columns = (
+            "test_transactions",
+            "test_fraud",
+        )
+
+        if "rule" in rule_metrics_df.columns:
+            for _, row in rule_metrics_df.iterrows():
+                aml_rules["rules"].append(
+                    {
+                        "rule_name": str(row["rule"]),
+                        "metrics": {
+                            metric: metric_value(row, metric)
+                            for metric in rule_metric_columns
+                        },
+                        "evaluation": {
+                            field: metric_value(row, field)
+                            for field in rule_evaluation_columns
+                            if field in rule_metrics_df.columns
+                        },
+                    }
+                )
+
+    return {"models": models}
+
+
+def get_activity_pattern_counts(transactions):
+    """
+    Count transaction-level AML flags across the full dataset.
+
+    Reuse persisted rule results only when every dataset transaction
+    has exactly one valid result for every activity rule.
+    """
+    global _activity_pattern_counts
+
+    if _activity_pattern_counts is not None:
+        return _activity_pattern_counts
+
+    if (
+        "transaction_id" not in transactions.columns
+        or transactions["transaction_id"].isna().any()
+        or transactions["transaction_id"].duplicated().any()
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "The transaction dataset must contain unique, "
+                "non-null transaction IDs to calculate activity patterns."
+            ),
+        )
+
+    transaction_ids = set(
+        transactions["transaction_id"].astype(str)
+    )
+    expected_result_count = (
+        len(transaction_ids) * len(ACTIVITY_RULES)
+    )
+
+    if AML_RULE_RESULTS_FILE.exists():
+        rule_results = load_csv(AML_RULE_RESULTS_FILE)
+        required_columns = {
+            "transaction_id",
+            "rule",
+            "triggered",
+        }
+
+        if required_columns.issubset(rule_results.columns):
+            relevant_results = rule_results[
+                rule_results["rule"].isin(ACTIVITY_RULES)
+            ].copy()
+
+            relevant_results["transaction_id"] = (
+                relevant_results["transaction_id"].astype(str)
+            )
+
+            triggered_values = (
+                relevant_results["triggered"]
+                .astype("string")
+                .str.strip()
+                .str.lower()
+                .map(
+                    {
+                        "true": 1,
+                        "false": 0,
+                        "1": 1,
+                        "0": 0,
+                    }
+                )
+            )
+
+            complete_results = (
+                len(relevant_results) == expected_result_count
+                and not relevant_results["transaction_id"].isna().any()
+                and not relevant_results["rule"].isna().any()
+                and not relevant_results.duplicated(
+                    subset=["transaction_id", "rule"]
+                ).any()
+                and set(relevant_results["transaction_id"])
+                == transaction_ids
+                and set(relevant_results["rule"]) == set(ACTIVITY_RULES)
+                and not triggered_values.isna().any()
+            )
+
+            if complete_results:
+                _activity_pattern_counts = {
+                    rule: int(
+                        relevant_results.loc[
+                            (relevant_results["rule"] == rule)
+                            & (triggered_values == 1),
+                            "transaction_id",
+                        ].nunique()
+                    )
+                    for rule in ACTIVITY_RULES
+                }
+                return _activity_pattern_counts
+
+    rule_input_columns = [
+        "transaction_id",
+        "timestamp",
+        "sender_account",
+        "receiver_account",
+        "amount",
+    ]
+    missing_columns = [
+        column
+        for column in rule_input_columns
+        if column not in transactions.columns
+    ]
+
+    if missing_columns:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Cannot calculate activity patterns; transaction "
+                "data is missing required rule inputs: "
+                + ", ".join(missing_columns)
+            ),
+        )
+
+    scored_transactions = score_transactions_chronologically(
+        transactions[rule_input_columns].copy()
+    )
+
+    scored_ids = scored_transactions["transaction_id"].astype(str)
+    if (
+        len(scored_transactions) != len(transaction_ids)
+        or scored_ids.duplicated().any()
+        or set(scored_ids) != transaction_ids
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "AML rules did not produce flags for every transaction "
+                "in the dataset."
+            ),
+        )
+
+    counts = {}
+    for rule in ACTIVITY_RULES:
+        if rule not in scored_transactions.columns:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "AML rule evaluation did not produce the "
+                    f"required activity flag: {rule}"
+                ),
+            )
+
+        values = pd.to_numeric(
+            scored_transactions[rule],
+            errors="coerce",
+        )
+
+        if values.isna().any() or not values.isin([0, 1]).all():
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "AML rule evaluation produced missing or invalid "
+                    f"values for activity flag: {rule}"
+                ),
+            )
+
+        counts[rule] = int(
+            scored_transactions.loc[
+                values == 1,
+                "transaction_id",
+            ].nunique()
+        )
+
+    _activity_pattern_counts = counts
+    return _activity_pattern_counts
 
 
 def dataframe_to_records(df):
@@ -421,6 +756,14 @@ def health():
         "status": "healthy",
         "service": "aegisgraph",
     }
+
+
+@app.get("/api/model-metrics")
+def get_model_metrics():
+    """
+    Return saved model evaluation metrics without recalculating them.
+    """
+    return model_metrics()
 
 
 # ============================================================
@@ -1095,6 +1438,7 @@ def project_summary():
     alerts_df = load_csv(ALERTS_FILE)
     cases_df = load_csv(CASES_FILE)
     dossiers_df = load_csv(DOSSIERS_FILE)
+    transactions = load_transaction_dataframe()
 
     risk_counts = (
         risk_df["risk_category"]
@@ -1107,8 +1451,17 @@ def project_summary():
         .value_counts()
         .to_dict()
     )
+    activity_pattern_counts = get_activity_pattern_counts(
+        transactions
+    )
 
     return {
+        "dataset": {
+            "total_transactions": int(
+                transactions["transaction_id"].nunique()
+            ),
+        },
+
         "risk": {
             "total_transactions": int(
                 len(risk_df)
@@ -1120,6 +1473,8 @@ def project_summary():
                 in risk_counts.items()
             },
         },
+
+        "activity_patterns": activity_pattern_counts,
 
         "alerts": {
             "total": int(
@@ -1184,6 +1539,31 @@ def get_transactions(
     """
 
     df = load_transaction_dataframe()
+
+    # Attach model predictions where available.
+    risk_df = load_csv(RISK_FILE)
+
+    risk_columns = [
+        "transaction_id",
+        "rf_probability",
+        "tgn_probability",
+        "thgnn_probability",
+        "rule_score",
+        "risk_score",
+        "risk_category",
+    ]
+
+    if all(col in risk_df.columns for col in risk_columns):
+        risk_df = risk_df[risk_columns].drop_duplicates(
+            subset=["transaction_id"]
+        )
+
+        df = df.merge(
+            risk_df,
+            on="transaction_id",
+            how="left",
+            validate="one_to_one",
+        )
 
     filtered = df.copy()
 
@@ -1276,12 +1656,7 @@ def get_transactions(
 
     page_data = filtered.iloc[start:end]
 
-    records = page_data.where(
-        pd.notnull(page_data),
-        None,
-    ).to_dict(
-        orient="records"
-    )
+    records = dataframe_to_records(page_data)
 
     total_pages = (
         (total + page_size - 1) // page_size

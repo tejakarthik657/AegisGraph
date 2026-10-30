@@ -1,7 +1,15 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { getAlert } from "../services/api";
+import RiskEvidenceCards from "../components/models/RiskEvidenceCards";
+import {
+  getAlert,
+  getTransactionById,
+} from "../services/api";
+import {
+  formatScorePercentage,
+  mergeTransactionRiskScores,
+} from "../utils/riskScores";
 
 function formatAmount(amount) {
   return new Intl.NumberFormat("en-IN", {
@@ -9,10 +17,6 @@ function formatAmount(amount) {
     currency: "INR",
     maximumFractionDigits: 2,
   }).format(amount);
-}
-
-function formatPercentage(value) {
-  return `${(value * 100).toFixed(1)}%`;
 }
 
 function formatDate(timestamp) {
@@ -54,29 +58,6 @@ function RiskBadge({ category }) {
       <span className="detail-risk-dot" />
       {category} RISK
     </span>
-  );
-}
-
-function EvidenceCard({
-  title,
-  value,
-  description,
-  className = "",
-}) {
-  return (
-    <div className={`evidence-card ${className}`}>
-      <div className="evidence-card-title">
-        {title}
-      </div>
-
-      <div className="evidence-card-value">
-        {value}
-      </div>
-
-      <div className="evidence-card-description">
-        {description}
-      </div>
-    </div>
   );
 }
 
@@ -184,9 +165,14 @@ export default function AlertDetails() {
         setError("");
 
         const data = await getAlert(alertId);
+        const transaction = await getTransactionById(
+          data.transaction_id
+        );
 
         if (mounted) {
-          setAlert(data);
+          setAlert(
+            mergeTransactionRiskScores(data, transaction)
+          );
         }
       } catch (err) {
         if (mounted) {
@@ -309,7 +295,7 @@ export default function AlertDetails() {
           </div>
 
           <div className="detail-hero-score">
-            {formatPercentage(alert.risk_score)}
+            {formatScorePercentage(alert.risk_score)}
           </div>
 
           <div className="detail-hero-description">
@@ -367,43 +353,7 @@ export default function AlertDetails() {
               </div>
             </div>
 
-            <div className="evidence-grid">
-              <EvidenceCard
-                title="Random Forest"
-                value={formatPercentage(
-                  alert.rf_probability
-                )}
-                description="Probability assigned by the Random Forest model."
-                className="evidence-blue"
-              />
-
-              <EvidenceCard
-                title="Temporal Graph Model"
-                value={formatPercentage(
-                  alert.tgn_probability
-                )}
-                description="Probability assigned by the temporal graph model."
-                className="evidence-purple"
-              />
-
-              <EvidenceCard
-                title="Rule Detection"
-                value={formatPercentage(
-                  alert.rule_score
-                )}
-                description="Combined score from triggered AML detection rules."
-                className="evidence-orange"
-              />
-
-              <EvidenceCard
-                title="Overall Risk"
-                value={formatPercentage(
-                  alert.risk_score
-                )}
-                description="Final risk score used to classify this alert."
-                className="evidence-red"
-              />
-            </div>
+            <RiskEvidenceCards scores={alert} />
           </section>
 
           <section className="detail-section">

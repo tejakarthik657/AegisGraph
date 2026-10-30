@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import RiskEvidenceCards from "../components/models/RiskEvidenceCards";
 import api from "../services/api";
 
 export default function Transactions() {
   const navigate = useNavigate();
 
   const [transactions, setTransactions] = useState([]);
+  const [selectedTransaction, setSelectedTransaction] = useState(null);
   const [pagination, setPagination] = useState({
     page: 1,
     page_size: 25,
@@ -25,6 +27,7 @@ export default function Transactions() {
     try {
       setLoading(true);
       setError("");
+      setSelectedTransaction(null);
 
       const params = {
         page,
@@ -373,9 +376,20 @@ export default function Transactions() {
 
                         <td>
                           <div className="transaction-id-cell">
-                            <strong>
+                            <button
+                              type="button"
+                              className="transaction-id-button"
+                              aria-label={`View risk details for ${transaction.transaction_id}`}
+                              aria-pressed={
+                                selectedTransaction?.transaction_id ===
+                                transaction.transaction_id
+                              }
+                              onClick={() =>
+                                setSelectedTransaction(transaction)
+                              }
+                            >
                               {transaction.transaction_id}
-                            </strong>
+                            </button>
 
                             {Number(transaction.is_fraud) === 1 && (
                               <span className="transaction-fraud-dot" />
@@ -452,6 +466,23 @@ export default function Transactions() {
 
                 </table>
               </div>
+
+              {selectedTransaction && (
+                <section className="detail-section transaction-risk-details">
+                  <div className="detail-section-heading">
+                    <h2>
+                      Risk Signals —{" "}
+                      {selectedTransaction.transaction_id}
+                    </h2>
+                    <p>
+                      Model probabilities, AML rule score, and final
+                      classification returned by the backend.
+                    </p>
+                  </div>
+
+                  <RiskEvidenceCards scores={selectedTransaction} />
+                </section>
+              )}
 
               {/* PAGINATION */}
               <div className="transactions-pagination">
